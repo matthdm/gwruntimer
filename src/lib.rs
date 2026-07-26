@@ -1,9 +1,8 @@
+
 mod gw;
 mod memory;
 mod run_log;
 
-
-use hudhook::imgui::draw_list::Triangle;
 use run_log::RunLog;
 
 
@@ -60,10 +59,15 @@ struct ZoneTimer {
     session_runs: Vec<RunEntry>,
     /// Whether the session-log window is open.
     show_log: bool,
+    /// Set when "Exit Timer" is picked, to open the confirm popup next.
+    confirm_exit: bool,
     /// Edit-mode state from the previous frame, for detecting enter/leave.
     was_edit: bool,
 
+    show_inst_timer: bool,
+
     state: ZoneTimerState,
+
 }
 
 impl Default for ZoneTimer {
@@ -76,13 +80,15 @@ impl Default for ZoneTimer {
             run_log: None,
             session_runs: Vec::new(),
             show_log: false,
+            confirm_exit: false,
+            show_inst_timer: false,
             was_edit: false,
             state: ZoneTimerState{
                 last_load_state: false,
                 mapid_before_run: 0,
                 mapid_during_run: 0,
                 mapid_now: 0
-            }
+            },
         }
     }
 }
@@ -147,19 +153,19 @@ impl ZoneTimer {
                 // Under SIZING_FIXED_FIT these three size to their content.
                 TableColumnSetup{
                     flags: TableColumnFlags::WIDTH_FIXED,
-                    init_width_or_weight: 175.0,
+                    init_width_or_weight: 160.0,
                     ..TableColumnSetup::new("From")
                 },
                 
                 // Under SIZING_FIXED_FIT these three size to their content.
                 TableColumnSetup{
                     flags: TableColumnFlags::WIDTH_FIXED,
-                    init_width_or_weight: 175.0,
+                    init_width_or_weight: 160.0,
                     ..TableColumnSetup::new("Through")
                 },
                 TableColumnSetup{
                     flags: TableColumnFlags::WIDTH_FIXED,
-                    init_width_or_weight: 175.0,
+                    init_width_or_weight: 160.0,
                     ..TableColumnSetup::new("To")
                 },
                 TableColumnSetup {
@@ -194,7 +200,8 @@ impl ZoneTimer {
 /// Display string for a map: its decoded name if available, otherwise the
 /// numeric id as a fallback while the async decode is still in flight.
 fn map_name_or_id(mapid: u32) -> String {
-    gw::mapdata::map_name(mapid).unwrap_or_else(|| mapid.to_string())
+   // gw::mapdata::map_name(mapid).unwrap_or_else(|| mapid.to_string())
+   mapid.to_string()
 }
 
 /// Format a duration as `MM:SS.d` with tenth-of-a-second precision.
@@ -207,28 +214,15 @@ fn format_duration(d: Duration) -> String {
     format!("{minutes:02}:{seconds:02}.{hundos:02}")
 }
 
-fn render_debug_map_names(ui: &mut imgui::Ui) {
-    ui.window("Debug Map Names")
-    .always_vertical_scrollbar(true)
-    .build(|| {
-        let table = ui.begin_table_header_with_flags(
-            "debug_map_data",
-            [
-                TableColumnSetup::new("MapID"),
-                TableColumnSetup::new("Map Name"),
-            ], 
-            TableFlags::empty()
-        );
-        if let Some(_table) = table {
-            for i in 1..0x378 {
-                ui.table_next_row();
-                ui.table_next_column();
-                ui.text(i.to_string());
-                ui.table_next_column();
-                ui.text(map_name_or_id(i));
-            }
-        }
-    });
+fn format_duration_hrs(d: Duration) -> String {
+    let hundos_total = d.as_millis() / 10;
+    let hundos = hundos_total % 100;
+    let secs_total = hundos_total / 100;
+    let seconds = secs_total % 60;
+    let minutes_total = secs_total / 60;
+    let minutes = minutes_total % 60;
+    let hours = minutes_total / 60;
+    format!("{hours}:{minutes:02}:{seconds:02}.{hundos:02}")
 }
 
 impl ImguiRenderLoop for ZoneTimer {
@@ -249,8 +243,14 @@ impl ImguiRenderLoop for ZoneTimer {
             }),
         }]);
         self.big_font = Some(SyncFont(id));
+        
 
-        match RunLog::in_memory() {
+        let run_log = match hudhook::util::get_dll_path() {
+            Some(path) => RunLog::open(path.parent().unwrap().join("kaos_zone_timer.db")),
+            None => RunLog::in_memory()
+        };
+
+        match run_log {
             Ok(log) => self.run_log = Some(log),
             Err(e) => tracing::error!("failed to open run log: {e}"),
         }
@@ -348,6 +348,10 @@ impl ImguiRenderLoop for ZoneTimer {
                     font.pop();
                 }
 
+                if self.show_inst_timer {
+                    ui.text(format_duration_hrs(gw::InstanceUpTimeData::current().get()));
+                }
+
                 if edit {
                     // Capture the (possibly dragged) position so it survives the
                     // switch back to the locked, position-pinned state.
@@ -388,20 +392,42 @@ impl ImguiRenderLoop for ZoneTimer {
 
                 if edit {
                     if let Some(_menu) = ui.begin_popup_context_window() {
-                        
-                         if ui
-                            .menu_item_config("Clear Log")
-                            .build()
-                        {
+                        if ui.menu_item_config("Clear Log").build() {
                             self.session_runs.clear();
                         }
 
-                        if ui
-                            .menu_item_config("Exit Timer")
-                            .build()
-                        {
-                            hudhook::eject();
+                        if ui.menu_item_config("Show Instance Time").selected(self.show_inst_timer).build() {
+                            self.show_inst_timer = !self.show_inst_timer;
                         }
+                        // Only record the intent here. Opening the popup from
+                        // inside the context menu would hash its id against the
+                        // menu's id stack and nest it one popup level deep, so
+                        // the `begin_modal_popup` below (main window, level 0)
+                        // would never match it — and the menu item's own
+                        // auto-close would tear the nested entry down anyway.
+                        if ui.menu_item_config("Exit Timer").build() {
+                            self.confirm_exit = true;
+                        }
+                    }
+                }
+
+                // Opened out here so the id and popup nesting level line up with
+                // the `begin_modal_popup` call that follows.
+                if std::mem::take(&mut self.confirm_exit) {
+                    ui.open_popup("Confirm Timer Exit");
+                }
+
+                // Modal (not plain popup) so it survives the user releasing the
+                // edit chord and grabs mouse capture while it's up.
+                if let Some(_exitpopup) = ui.begin_modal_popup("Confirm Timer Exit") {
+                    ui.text("Are you sure you want to exit the timer?");
+
+                    if ui.button("Yes") {
+                        hudhook::eject();
+                    }
+                    ui.same_line();
+                    if ui.button("No") {
+                        ui.close_current_popup();
                     }
                 }
             });
@@ -410,6 +436,30 @@ impl ImguiRenderLoop for ZoneTimer {
             // Release focus back to the game when leaving edit mode.
             unsafe { imgui::sys::igSetWindowFocus_Nil() };
         }
+
+    }
+
+    fn message_filter(&self, io: &imgui::Io) -> hudhook::MessageFilter {
+        // Only take input away from the game when ImGui actually wants it:
+        //  - mouse: while the cursor is over one of our windows or dragging a
+        //    widget (`want_capture_mouse`), so clicks on the overlay no longer
+        //    leak through to the game underneath.
+        //  - keyboard: only while an ImGui text field has focus
+        //    (`want_capture_keyboard`), which today is basically never.
+        //
+        // We deliberately never block based on the held Ctrl+Shift edit chord.
+        // Doing that ate the KEY-UP for whichever modifier was released first
+        // (the cached filter was still "block all keyboard" at that instant),
+        // leaving the game convinced the modifier was still held down. Letting
+        // every modifier up/down reach the game keeps its key state in sync.
+        let mut filter = hudhook::MessageFilter::empty();
+        if io.want_capture_mouse {
+            filter |= hudhook::MessageFilter::InputMouse;
+        }
+        if io.want_capture_keyboard {
+            filter |= hudhook::MessageFilter::InputKeyboard;
+        }
+        filter
     }
 }
 
