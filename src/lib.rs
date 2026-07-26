@@ -1,7 +1,7 @@
 
 mod gw;
-mod memory;
 mod run_log;
+mod map_names;
 
 use run_log::RunLog;
 
@@ -185,11 +185,11 @@ impl ZoneTimer {
             for run in self.session_runs.iter().rev() {
                 ui.table_next_row();
                 ui.table_next_column();
-                ui.text(map_name_or_id(run.from_map_id));
+                ui.text(map_names::map_name_by_id(run.from_map_id));
                 ui.table_next_column();
-                ui.text(map_name_or_id(run.run_map_id));
+                ui.text(map_names::map_name_by_id(run.run_map_id));
                 ui.table_next_column();
-                ui.text(map_name_or_id(run.to_map_id));
+                ui.text(map_names::map_name_by_id(run.to_map_id));
                 ui.table_next_column();
                 ui.text(format_duration(run.duration));
             }
