@@ -263,36 +263,42 @@ impl ImguiRenderLoop for ZoneTimer {
 
         // timer logic
 
-        let map_data_ptr = gw::MissionData::current();
-        let movement_ptr  = gw::CharControlledData::current();
+        // let map_data_ptr = gw::MissionMapData::current();
+        
 
-        if map_data_ptr.is_loaded() {
-            if self.state.last_load_state == false {
-                let cur_map_id = map_data_ptr.map_id();
-                self.state.mapid_before_run = self.state.mapid_during_run;
-                self.state.mapid_during_run = self.state.mapid_now;
-                self.state.mapid_now = cur_map_id;
-                if !self.elapsed().is_zero() {
-                    self.record_run(
-                        self.state.mapid_before_run, 
-                        self.state.mapid_during_run,
-                        self.state.mapid_now, 
-                    self.elapsed());
-                    self.reset();
+        if let Some(map_data) = gw::MissionMapData::current() {
+            if map_data.is_loaded() {
+                if self.state.last_load_state == false {
+                    let cur_map_id = map_data.map_id;
+                    self.state.mapid_before_run = self.state.mapid_during_run;
+                    self.state.mapid_during_run = self.state.mapid_now;
+                    self.state.mapid_now = cur_map_id;
+                    if !self.elapsed().is_zero() {
+                        self.record_run(
+                            self.state.mapid_before_run, 
+                            self.state.mapid_during_run,
+                            self.state.mapid_now, 
+                        self.elapsed());
+                        self.reset();
+                    }
+                }
+                if map_data.is_explorable != 0 {
+                    if !self.is_running() {
+                        if let Some(controlled_char) = gw::CharControlledCharacterData::current() {
+                            if  controlled_char.is_moving() {
+                                self.start();
+                            }
+                        }
+                    }
                 }
             }
-            if map_data_ptr.is_explorable() {
-                if !self.is_running() && movement_ptr.is_moving() {
-                    self.start();
+            else {
+                if self.is_running() {
+                    self.pause();
                 }
             }
+            self.state.last_load_state = map_data.is_loaded();
         }
-        else {
-            if self.is_running() {
-                self.pause();
-            }
-        }
-        self.state.last_load_state = map_data_ptr.is_loaded();
 
 
 
@@ -349,7 +355,9 @@ impl ImguiRenderLoop for ZoneTimer {
                 }
 
                 if self.show_inst_timer {
-                    ui.text(format_duration_hrs(gw::InstanceUpTimeData::current().get()));
+                    if let Some(instance_time) = gw::get_instance_uptime() {
+                        ui.text(format_duration_hrs(Duration::from_millis(*instance_time as u64)));
+                    }
                 }
 
                 if edit {
