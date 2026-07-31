@@ -40,7 +40,8 @@ pub struct CharContext {
 
 #[repr(C)]
 pub struct CinematicContext {
-    
+    pad0: [u8; 4],
+    script: *const ()
 }
 
 #[repr(C)]
@@ -124,7 +125,13 @@ pub fn get_instance_uptime() -> Option<& 'static u32> {
     }
 }
 
-
+pub fn get_in_cinematic() -> Option<()> {
+    unsafe {
+        let pctx = get_context_tls().as_ref()?;
+        let cinematic = pctx.cinematic.as_ref()?;
+        if cinematic.script.is_null() { None } else { Some(()) }
+    }
+}
 
 
 
