@@ -1,2 +1,6 @@
 [build]
 target = "i686-pc-windows-msvc"
+
+[alias]
+# Release build + zip of the dll and launcher, stamped with revision and hash.
+dist = "run --quiet --release --package xtask --"

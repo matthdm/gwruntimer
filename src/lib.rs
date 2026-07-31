@@ -3,6 +3,10 @@ mod gw;
 mod run_log;
 mod map_names;
 
+pub mod version {
+    include!(concat!(env!("OUT_DIR"), "/version.rs"));
+}
+
 use run_log::RunLog;
 
 
@@ -328,7 +332,7 @@ impl ImguiRenderLoop for ZoneTimer {
         let pos_cond = if edit { Condition::Appearing } else { Condition::Always };
 
         let mut win = ui
-            .window("KAOS' Zone Timer##zone_timer")
+            .window(format!("KAOS' Zone Timer (r{}:{})##zone_timer", version::GIT_REVISION,version::GIT_HASH))
             .position(self.pos, pos_cond)
             // Bring the window to the front on the frame we enter edit mode;
             // `.focused(false)` is a no-op, so this only fires on the transition.

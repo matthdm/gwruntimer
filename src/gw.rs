@@ -39,7 +39,9 @@ pub struct CharContext {
 }
 
 #[repr(C)]
-pub struct CinematicContext;
+pub struct CinematicContext {
+    
+}
 
 #[repr(C)]
  pub struct MissionCharData {

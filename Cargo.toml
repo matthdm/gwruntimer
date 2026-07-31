@@ -1,5 +1,7 @@
 [workspace]
-members = [".", "launcher"]
+members = [".", "launcher", "xtask"]
+# Keep the task runner out of a plain `cargo build`; it is reached via `cargo dist`.
+default-members = [".", "launcher"]
 
 [package]
 name = "gw-run-timer"
