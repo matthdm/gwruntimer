@@ -140,7 +140,7 @@ impl RunLog {
         stmt.query_map(params![limit as i64], row_to_entry)?.collect()
     }
 
-    /// Aggregated route records, sorted by most frequently run first.
+    /// Aggregated route records, sorted by the order they were initially logged (first run).
     pub fn records(&self) -> Result<Vec<RouteRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -150,7 +150,7 @@ impl RunLog {
                     CAST(AVG(duration_ms) AS INTEGER) AS avg_ms
              FROM runs
              GROUP BY from_map_id, run_map_id, to_map_id
-             ORDER BY run_count DESC, pb_ms ASC",
+             ORDER BY MIN(id) ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(RouteRecord {
@@ -257,33 +257,34 @@ mod tests {
     }
 
     #[test]
-    fn records_aggregates_counts_pb_and_avg_sorted_by_count() {
+    fn records_aggregates_counts_pb_and_avg_sorted_by_initial_log_order() {
         let log = RunLog::in_memory().unwrap();
-        // Route A: 3 runs: 100s, 80s, 120s -> count 3, PB 80s, Avg 100s
+        // Route B: 1st logged (id 1): 50s -> count 1, PB 50s, Avg 50s
+        log.log_run(10, 20, 30, Duration::from_secs(50)).unwrap();
+
+        // Route A: 2nd logged (id 2, 3, 4): 100s, 80s, 120s -> count 3, PB 80s, Avg 100s
         log.log_run(1, 2, 3, Duration::from_secs(100)).unwrap();
         log.log_run(1, 2, 3, Duration::from_secs(80)).unwrap();
         log.log_run(1, 2, 3, Duration::from_secs(120)).unwrap();
 
-        // Route B: 1 run: 50s -> count 1, PB 50s, Avg 50s
-        log.log_run(10, 20, 30, Duration::from_secs(50)).unwrap();
-
         let recs = log.records().unwrap();
         assert_eq!(recs.len(), 2);
 
-        // Most frequent first
-        assert_eq!(recs[0].from_map_id, 1);
-        assert_eq!(recs[0].run_map_id, 2);
-        assert_eq!(recs[0].to_map_id, 3);
-        assert_eq!(recs[0].run_count, 3);
-        assert_eq!(recs[0].pb, Duration::from_secs(80));
-        assert_eq!(recs[0].avg, Duration::from_secs(100));
+        // Initial logged route first (Route B, first id 1)
+        assert_eq!(recs[0].from_map_id, 10);
+        assert_eq!(recs[0].run_map_id, 20);
+        assert_eq!(recs[0].to_map_id, 30);
+        assert_eq!(recs[0].run_count, 1);
+        assert_eq!(recs[0].pb, Duration::from_secs(50));
+        assert_eq!(recs[0].avg, Duration::from_secs(50));
 
-        assert_eq!(recs[1].from_map_id, 10);
-        assert_eq!(recs[1].run_map_id, 20);
-        assert_eq!(recs[1].to_map_id, 30);
-        assert_eq!(recs[1].run_count, 1);
-        assert_eq!(recs[1].pb, Duration::from_secs(50));
-        assert_eq!(recs[1].avg, Duration::from_secs(50));
+        // Route A second (first id 2)
+        assert_eq!(recs[1].from_map_id, 1);
+        assert_eq!(recs[1].run_map_id, 2);
+        assert_eq!(recs[1].to_map_id, 3);
+        assert_eq!(recs[1].run_count, 3);
+        assert_eq!(recs[1].pb, Duration::from_secs(80));
+        assert_eq!(recs[1].avg, Duration::from_secs(100));
     }
 
     #[test]

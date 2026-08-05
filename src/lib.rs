@@ -290,7 +290,7 @@ impl ZoneTimer {
         let time_width = ui.calc_text_size("00:00.00")[0] + 5.0;
         let runs_width = ui.calc_text_size("Runs")[0] + 10.0;
         let actions_width = if edit {
-            ui.calc_text_size(" x ")[0] + ui.calc_text_size(" Pin ")[0] + 16.0
+            85.0
         } else {
             1.0
         };
@@ -804,7 +804,7 @@ impl ImguiRenderLoop for ZoneTimer {
             }
             ui.window("Personal Records##records_window")
                 .opened(&mut opened)
-                .size([680.0, 400.0], Condition::FirstUseEver)
+                .size([840.0, 480.0], Condition::FirstUseEver)
                 .flags(rec_flags)
                 .build(|| {
                     self.render_records_table(ui, edit);

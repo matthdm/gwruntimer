@@ -366,7 +366,7 @@ pub static ALL_CATEGORIES: &[RunCategory] = &[
         exclude_explorables: &[],
     },
     RunCategory {
-        name: "EotN Tour",
+        name: "Eye of the North Tour",
         zones: &[
             "Boreal Station",
             "Ice Cliff Chasms",
@@ -384,10 +384,17 @@ pub static ALL_CATEGORIES: &[RunCategory] = &[
             "Olafstead",
             "Verdant Cascades",
             "Umbral Grotto",
+            "Vloxen Excavations",
             "Vloxen Excavations (Level 1)",
+            "Vloxen Excavations: Level 1",
+            "Vloxen Excavations: Level 2",
+            "Vloxen Excavations: Level 3",
             "Vlox's Falls",
             "Arbor Bay",
             "Shards of Orr",
+            "Shards of Orr: Level 1",
+            "Shards of Orr: Level 2",
+            "Shards of Orr: Level 3",
             "Gadd's Encampment",
             "Alcazia Tangle",
             "Rata Sum",
@@ -455,5 +462,9 @@ mod tests {
         let factions = ALL_CATEGORIES.iter().find(|c| c.name == "Factions Rush").unwrap();
         // Sunjiang District (220) as explorable run_map: EXCLUDED
         assert!(!factions.matches(218, 220, 222));
+
+        let eotn = ALL_CATEGORIES.iter().find(|c| c.name == "Eye of the North Tour").unwrap();
+        // Umbral Grotto (639) -> Vloxen Excavations (604) -> Vlox's Falls (624): SHOULD MATCH
+        assert!(eotn.matches(639, 604, 624));
     }
 }
