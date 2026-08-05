@@ -152,10 +152,13 @@ impl ZoneTimer {
         format_duration(self.elapsed())
     }
 
-    /// Log a completed run to the database and this session's list. Intended to
-    /// be called by the (upcoming) map-change detection.
+    /// Log a completed run to the database and this session's list.
+    /// Runs that start and end in the same location are ignored to prevent mistakes.
     #[allow(dead_code)]
     fn record_run(&mut self, from_map_id: u32, run_map_id: u32, to_map_id: u32, duration: Duration) {
+        if from_map_id == to_map_id {
+            return;
+        }
         let Some(log) = &self.run_log else { return };
         match log.log_run(from_map_id, run_map_id, to_map_id, duration) {
             Ok(entry) => {

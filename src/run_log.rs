@@ -141,6 +141,7 @@ impl RunLog {
     }
 
     /// Aggregated route records, sorted by the order they were initially logged (first run).
+    /// Runs where the start and end map are identical (e.g. accidental re-entry) are excluded.
     pub fn records(&self) -> Result<Vec<RouteRecord>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -149,6 +150,7 @@ impl RunLog {
                     MIN(duration_ms) AS pb_ms,
                     CAST(AVG(duration_ms) AS INTEGER) AS avg_ms
              FROM runs
+             WHERE from_map_id != to_map_id
              GROUP BY from_map_id, run_map_id, to_map_id
              ORDER BY MIN(id) ASC",
         )?;
@@ -313,5 +315,20 @@ mod tests {
         // Other route unaffected
         let other = log.runs_for_route(4, 5, 6).unwrap();
         assert_eq!(other.len(), 1);
+    }
+
+    #[test]
+    fn records_excludes_runs_starting_and_ending_in_same_location() {
+        let log = RunLog::in_memory().unwrap();
+        // Valid route: 100 -> 200 -> 300
+        log.log_run(100, 200, 300, Duration::from_secs(60)).unwrap();
+        // Accidental re-entry / mistake: 100 -> 200 -> 100
+        log.log_run(100, 200, 100, Duration::from_secs(10)).unwrap();
+
+        let recs = log.records().unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].from_map_id, 100);
+        assert_eq!(recs[0].run_map_id, 200);
+        assert_eq!(recs[0].to_map_id, 300);
     }
 }
