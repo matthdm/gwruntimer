@@ -10,7 +10,7 @@ pub mod version {
 use run_log::RunLog;
 
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use hudhook::ImguiRenderLoop;
 use hudhook::RenderContext;
@@ -19,7 +19,7 @@ use hudhook::imgui::{
     TableFlags, TreeNodeFlags, WindowFlags,
 };
 
-use run_log::RunEntry;
+use run_log::{RouteRecord, RunEntry};
 
 /// Pixel size of the large timer font, loaded once in `initialize`.
 const TIMER_FONT_PX: f32 = 48.0;
@@ -63,8 +63,18 @@ struct ZoneTimer {
     session_runs: Vec<RunEntry>,
     /// Whether the session-log window is open.
     show_log: bool,
+    /// Aggregated route records loaded from the database.
+    records: Vec<RouteRecord>,
+    /// Whether the personal-records window is open.
+    show_records: bool,
     /// Set when "Exit Timer" is picked, to open the confirm popup next.
     confirm_exit: bool,
+    /// Target route awaiting confirmation to delete (from, run, to).
+    pending_delete_route: Option<(u32, u32, u32)>,
+    /// Set when a route delete button is clicked, to open the confirm modal next.
+    confirm_delete_route: bool,
+    /// The currently pinned route whose PB is displayed under the timer (from, run, to).
+    pinned_route: Option<(u32, u32, u32)>,
     /// Edit-mode state from the previous frame, for detecting enter/leave.
     was_edit: bool,
 
@@ -84,7 +94,12 @@ impl Default for ZoneTimer {
             run_log: None,
             session_runs: Vec::new(),
             show_log: false,
+            records: Vec::new(),
+            show_records: false,
             confirm_exit: false,
+            pending_delete_route: None,
+            confirm_delete_route: false,
+            pinned_route: None,
             show_inst_timer: false,
             was_edit: false,
             state: ZoneTimerState{
@@ -135,8 +150,184 @@ impl ZoneTimer {
     fn record_run(&mut self, from_map_id: u32, run_map_id: u32, to_map_id: u32, duration: Duration) {
         let Some(log) = &self.run_log else { return };
         match log.log_run(from_map_id, run_map_id, to_map_id, duration) {
-            Ok(entry) => self.session_runs.push(entry),
+            Ok(entry) => {
+                self.session_runs.push(entry);
+                self.refresh_records();
+            }
             Err(e) => tracing::error!("failed to log run: {e}"),
+        }
+    }
+
+    /// Refresh aggregated route records from the database into memory.
+    fn refresh_records(&mut self) {
+        if let Some(log) = &self.run_log {
+            match log.records() {
+                Ok(recs) => self.records = recs,
+                Err(e) => tracing::error!("failed to load route records: {e}"),
+            }
+        }
+    }
+
+    /// Draw the table of personal records and route statistics. Meant to be
+    /// called inside the main window, under the personal-records collapsing header.
+    fn render_records_table(&mut self, ui: &imgui::Ui, edit: bool) {
+        if self.records.is_empty() {
+            ui.text_disabled("No records logged in database.");
+            return;
+        }
+
+        let mut delete_run_id: Option<i64> = None;
+
+        let time_width = ui.calc_text_size("00:00.00")[0] + 5.0;
+        let runs_width = ui.calc_text_size("Runs")[0] + 10.0;
+        let actions_width = if edit {
+            ui.calc_text_size(" x ")[0] + ui.calc_text_size(" Pin ")[0] + 16.0
+        } else {
+            1.0
+        };
+        let table = ui.begin_table_header_with_flags(
+            "personal_records",
+            [
+                TableColumnSetup {
+                    flags: TableColumnFlags::WIDTH_FIXED,
+                    init_width_or_weight: 160.0,
+                    ..TableColumnSetup::new("From")
+                },
+                TableColumnSetup {
+                    flags: TableColumnFlags::WIDTH_FIXED,
+                    init_width_or_weight: 160.0,
+                    ..TableColumnSetup::new("Through")
+                },
+                TableColumnSetup {
+                    flags: TableColumnFlags::WIDTH_FIXED,
+                    init_width_or_weight: 160.0,
+                    ..TableColumnSetup::new("To")
+                },
+                TableColumnSetup {
+                    flags: TableColumnFlags::WIDTH_FIXED,
+                    init_width_or_weight: runs_width,
+                    ..TableColumnSetup::new("Runs")
+                },
+                TableColumnSetup {
+                    flags: TableColumnFlags::WIDTH_FIXED,
+                    init_width_or_weight: time_width,
+                    ..TableColumnSetup::new("PB")
+                },
+                TableColumnSetup {
+                    flags: TableColumnFlags::WIDTH_FIXED,
+                    init_width_or_weight: time_width,
+                    ..TableColumnSetup::new("Avg")
+                },
+                TableColumnSetup {
+                    flags: TableColumnFlags::WIDTH_FIXED,
+                    init_width_or_weight: actions_width,
+                    ..TableColumnSetup::new("")
+                },
+            ],
+            TableFlags::SIZING_FIXED_FIT,
+        );
+        if let Some(_table) = table {
+            for rec in &self.records {
+                ui.table_next_row();
+                ui.table_next_column();
+
+                let route_from_name = map_names::map_name_by_id(rec.from_map_id);
+                let is_open = ui.tree_node_config(format!("{route_from_name}##node_{}_{}_{}", rec.from_map_id, rec.run_map_id, rec.to_map_id))
+                    .push();
+
+                ui.table_next_column();
+                ui.text(map_names::map_name_by_id(rec.run_map_id));
+                ui.table_next_column();
+                ui.text(map_names::map_name_by_id(rec.to_map_id));
+                ui.table_next_column();
+                ui.text(rec.run_count.to_string());
+                ui.table_next_column();
+                ui.text_colored([0.2, 0.9, 0.35, 1.0], format_duration(rec.pb));
+                ui.table_next_column();
+                ui.text(format_duration(rec.avg));
+                ui.table_next_column();
+                if edit {
+                    let _btn_color = ui.push_style_color(StyleColor::Text, [0.9, 0.4, 0.4, 1.0]);
+                    if ui.small_button(format!("x##del_route_{}_{}_{}", rec.from_map_id, rec.run_map_id, rec.to_map_id)) {
+                        self.pending_delete_route = Some((rec.from_map_id, rec.run_map_id, rec.to_map_id));
+                        self.confirm_delete_route = true;
+                    }
+                    drop(_btn_color);
+                    if ui.is_item_hovered() {
+                        ui.tooltip_text("Delete all runs for this route");
+                    }
+
+                    ui.same_line();
+                    let is_pinned = self.pinned_route == Some((rec.from_map_id, rec.run_map_id, rec.to_map_id));
+                    let pin_color = if is_pinned {
+                        [0.2, 0.9, 0.35, 1.0]
+                    } else {
+                        [0.7, 0.7, 0.7, 1.0]
+                    };
+                    let _pin_btn_color = ui.push_style_color(StyleColor::Text, pin_color);
+                    if ui.small_button(format!("Pin##pin_route_{}_{}_{}", rec.from_map_id, rec.run_map_id, rec.to_map_id)) {
+                        if is_pinned {
+                            self.pinned_route = None;
+                        } else {
+                            self.pinned_route = Some((rec.from_map_id, rec.run_map_id, rec.to_map_id));
+                        }
+                    }
+                    drop(_pin_btn_color);
+                    if ui.is_item_hovered() {
+                        if is_pinned {
+                            ui.tooltip_text("Unpin PB from timer");
+                        } else {
+                            ui.tooltip_text("Pin PB under timer");
+                        }
+                    }
+                }
+
+                if let Some(_token) = is_open {
+                    if let Some(log) = &self.run_log {
+                        if let Ok(runs) = log.runs_for_route(rec.from_map_id, rec.run_map_id, rec.to_map_id) {
+                            for (idx, run) in runs.iter().enumerate() {
+                                ui.table_next_row();
+                                ui.table_next_column();
+                                let item_label = format!("  Run #{}", idx + 1);
+                                ui.text_disabled(&item_label);
+
+                                ui.table_next_column();
+                                ui.text_disabled(format_system_date(run.completed_at));
+                                ui.table_next_column();
+                                ui.text_disabled("");
+                                ui.table_next_column();
+                                ui.text_disabled("");
+                                ui.table_next_column();
+                                if run.duration == rec.pb {
+                                    ui.text_colored([0.2, 0.9, 0.35, 1.0], format_duration(run.duration));
+                                } else {
+                                    ui.text_disabled(format_duration(run.duration));
+                                }
+                                ui.table_next_column();
+                                ui.text_disabled("");
+                                ui.table_next_column();
+                                if edit {
+                                    let _btn_color = ui.push_style_color(StyleColor::Text, [0.9, 0.4, 0.4, 1.0]);
+                                    if ui.small_button(format!("x##del_run_{}", run.id)) {
+                                        delete_run_id = Some(run.id);
+                                    }
+                                    drop(_btn_color);
+                                    if ui.is_item_hovered() {
+                                        ui.tooltip_text("Delete this run");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(id) = delete_run_id {
+            if let Some(log) = &self.run_log {
+                let _ = log.delete_run(id);
+            }
+            self.refresh_records();
         }
     }
 
@@ -229,6 +420,28 @@ fn format_duration_hrs(d: Duration) -> String {
     format!("{hours}:{minutes:02}:{seconds:02}.{hundos:02}")
 }
 
+fn format_system_date(t: SystemTime) -> String {
+    let secs = t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let days = secs / 86400;
+    let time_secs = secs % 86400;
+    let hours = time_secs / 3600;
+    let minutes = (time_secs % 3600) / 60;
+    let seconds = time_secs % 60;
+
+    let z = days as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1024 + doe / 1461 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{y:04}-{m:02}-{d:02} {hours:02}:{minutes:02}:{seconds:02}")
+}
+
 impl ImguiRenderLoop for ZoneTimer {
     fn initialize<'a>(&'a mut self, ctx: &mut imgui::Context, _rc: &'a mut dyn RenderContext) {
         let fonts = ctx.fonts();
@@ -255,7 +468,12 @@ impl ImguiRenderLoop for ZoneTimer {
         };
 
         match run_log {
-            Ok(log) => self.run_log = Some(log),
+            Ok(log) => {
+                if let Ok(recs) = log.records() {
+                    self.records = recs;
+                }
+                self.run_log = Some(log);
+            }
             Err(e) => tracing::error!("failed to open run log: {e}"),
         }
     }
@@ -338,10 +556,10 @@ impl ImguiRenderLoop for ZoneTimer {
             // `.focused(false)` is a no-op, so this only fires on the transition.
             .focused(entered_edit)
             .flags(flags);
-        // When the log table is showing, hold the window to at least 300x700 so
-        // the run list has room; otherwise it auto-resizes to hug the timer.
+        // When the log is showing, hold the window to at least 640x400
+        // so the list has room; otherwise it auto-resizes to hug the timer.
         if self.show_log {
-            win = win.size_constraints([600.0, 400.0], [f32::MAX, f32::MAX]);
+            win = win.size_constraints([640.0, 400.0], [f32::MAX, f32::MAX]);
         }
 
         win.build(|| {
@@ -356,6 +574,12 @@ impl ImguiRenderLoop for ZoneTimer {
                 ui.text_colored(color, self.format_time());
                 if let Some(font) = font {
                     font.pop();
+                }
+
+                if let Some((p_from, p_run, p_to)) = self.pinned_route {
+                    if let Some(rec) = self.records.iter().find(|r| r.from_map_id == p_from && r.run_map_id == p_run && r.to_map_id == p_to) {
+                        ui.text_colored([0.2, 0.9, 0.35, 1.0], format!("PB: {}", format_duration(rec.pb)));
+                    }
                 }
 
                 if self.show_inst_timer {
@@ -404,12 +628,16 @@ impl ImguiRenderLoop for ZoneTimer {
 
                 if edit {
                     if let Some(_menu) = ui.begin_popup_context_window() {
-                        if ui.menu_item_config("Clear Log").build() {
-                            self.session_runs.clear();
+                        if ui.menu_item_config("Personal Records").selected(self.show_records).build() {
+                            self.show_records = !self.show_records;
                         }
 
                         if ui.menu_item_config("Show Instance Time").selected(self.show_inst_timer).build() {
                             self.show_inst_timer = !self.show_inst_timer;
+                        }
+
+                        if ui.menu_item_config("Clear Log").build() {
+                            self.session_runs.clear();
                         }
                         // Only record the intent here. Opening the popup from
                         // inside the context menu would hash its id against the
@@ -443,6 +671,59 @@ impl ImguiRenderLoop for ZoneTimer {
                     }
                 }
             });
+
+        // Separate Personal Records window opened via the right-click menu.
+        if self.show_records {
+            let mut opened = self.show_records;
+            let mut rec_flags = WindowFlags::NO_SAVED_SETTINGS;
+            if !edit {
+                rec_flags |= WindowFlags::NO_MOVE | WindowFlags::NO_RESIZE;
+            }
+            ui.window("Personal Records##records_window")
+                .opened(&mut opened)
+                .size([680.0, 400.0], Condition::FirstUseEver)
+                .flags(rec_flags)
+                .build(|| {
+                    self.render_records_table(ui, edit);
+                });
+            self.show_records = opened;
+        }
+
+        if std::mem::take(&mut self.confirm_delete_route) {
+            ui.open_popup("Delete Route History?");
+        }
+
+        if let Some(_deletepopup) = ui.begin_modal_popup("Delete Route History?") {
+            if let Some((from, run, to)) = self.pending_delete_route {
+                let from_name = map_names::map_name_by_id(from);
+                let run_name = map_names::map_name_by_id(run);
+                let to_name = map_names::map_name_by_id(to);
+                ui.text(format!(
+                    "Delete all recorded runs for route:\n\n  {} -> {} -> {}\n\nThis cannot be undone.",
+                    from_name, run_name, to_name
+                ));
+                ui.spacing();
+
+                if ui.button("Delete") {
+                    if let Some(log) = &self.run_log {
+                        let _ = log.delete_route(from, run, to);
+                    }
+                    if self.pinned_route == Some((from, run, to)) {
+                        self.pinned_route = None;
+                    }
+                    self.refresh_records();
+                    self.pending_delete_route = None;
+                    ui.close_current_popup();
+                }
+                ui.same_line();
+                if ui.button("Cancel") {
+                    self.pending_delete_route = None;
+                    ui.close_current_popup();
+                }
+            } else {
+                ui.close_current_popup();
+            }
+        }
 
         if left_edit {
             // Release focus back to the game when leaving edit mode.
