@@ -29,7 +29,7 @@ pub struct RunEntry {
 }
 
 /// Aggregated statistics and personal records for a specific 3-map route.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouteRecord {
     /// Map we zoned in from (where the run started).
     pub from_map_id: u32,

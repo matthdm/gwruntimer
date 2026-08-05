@@ -2,6 +2,7 @@
 mod gw;
 mod run_log;
 mod map_names;
+mod categories;
 
 pub mod version {
     include!(concat!(env!("OUT_DIR"), "/version.rs"));
@@ -20,6 +21,13 @@ use hudhook::imgui::{
 };
 
 use run_log::{RouteRecord, RunEntry};
+
+/// Target that can be pinned to display its PB on the main timer readout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PinnedTarget {
+    Route { from: u32, run: u32, to: u32 },
+    Category(&'static str),
+}
 
 /// Pixel size of the large timer font, loaded once in `initialize`.
 const TIMER_FONT_PX: f32 = 48.0;
@@ -73,8 +81,8 @@ struct ZoneTimer {
     pending_delete_route: Option<(u32, u32, u32)>,
     /// Set when a route delete button is clicked, to open the confirm modal next.
     confirm_delete_route: bool,
-    /// The currently pinned route whose PB is displayed under the timer (from, run, to).
-    pinned_route: Option<(u32, u32, u32)>,
+    /// The currently pinned route or category whose PB is displayed under the timer.
+    pinned_target: Option<PinnedTarget>,
     /// Edit-mode state from the previous frame, for detecting enter/leave.
     was_edit: bool,
 
@@ -99,7 +107,7 @@ impl Default for ZoneTimer {
             confirm_exit: false,
             pending_delete_route: None,
             confirm_delete_route: false,
-            pinned_route: None,
+            pinned_target: None,
             show_inst_timer: false,
             was_edit: false,
             state: ZoneTimerState{
@@ -168,8 +176,8 @@ impl ZoneTimer {
         }
     }
 
-    /// Draw the table of personal records and route statistics. Meant to be
-    /// called inside the main window, under the personal-records collapsing header.
+    /// Draw the table of personal records and route statistics, grouped by
+    /// running categories with collapsible dropdowns and aggregate totals.
     fn render_records_table(&mut self, ui: &imgui::Ui, edit: bool) {
         if self.records.is_empty() {
             ui.text_disabled("No records logged in database.");
@@ -178,6 +186,107 @@ impl ZoneTimer {
 
         let mut delete_run_id: Option<i64> = None;
 
+        for cat in categories::ALL_CATEGORIES {
+            let summary = cat.summarize(&self.records);
+            if !summary.records.is_empty() {
+                let header_title = format!("{}##cat_{}", cat.name, cat.name);
+                let is_open = ui.collapsing_header(header_title, TreeNodeFlags::empty());
+                let rect_min = ui.item_rect_min();
+                let rect_max = ui.item_rect_max();
+                let title_size = ui.calc_text_size(cat.name);
+
+                let mut x = rect_min[0] + title_size[0] + 32.0;
+                let y = rect_min[1] + (rect_max[1] - rect_min[1] - title_size[1]) * 0.5;
+
+                let draw_list = ui.get_window_draw_list();
+                let text_gray = [0.6, 0.6, 0.6, 1.0];
+                let text_green = [0.2, 0.9, 0.35, 1.0];
+
+                draw_list.add_text([x, y], text_gray, "[PB: ");
+                x += ui.calc_text_size("[PB: ")[0];
+
+                let pb_str = format_duration(summary.total_pb);
+                draw_list.add_text([x, y], text_green, &pb_str);
+                x += ui.calc_text_size(&pb_str)[0];
+
+                let rest = format!(" | Avg: {} | Zones: {}]", format_duration(summary.total_avg), summary.zone_count);
+                draw_list.add_text([x, y], text_gray, &rest);
+
+                if is_open {
+                    if edit {
+                        let is_cat_pinned = self.pinned_target == Some(PinnedTarget::Category(cat.name));
+                        let pin_color = if is_cat_pinned {
+                            [0.2, 0.9, 0.35, 1.0]
+                        } else {
+                            [0.7, 0.7, 0.7, 1.0]
+                        };
+                        let _pin_btn_color = ui.push_style_color(StyleColor::Text, pin_color);
+                        let btn_label = if is_cat_pinned { "Unpin Category PB" } else { "Pin Category PB" };
+                        if ui.small_button(format!("{btn_label}##pin_cat_{}", cat.name)) {
+                            if is_cat_pinned {
+                                self.pinned_target = None;
+                            } else {
+                                self.pinned_target = Some(PinnedTarget::Category(cat.name));
+                            }
+                        }
+                        drop(_pin_btn_color);
+                        if ui.is_item_hovered() {
+                            if is_cat_pinned {
+                                ui.tooltip_text("Unpin category total PB from main timer");
+                            } else {
+                                ui.tooltip_text("Pin category total PB under main timer");
+                            }
+                        }
+                        ui.spacing();
+                    }
+                    self.render_records_subtable(ui, edit, &summary.records, cat.name, &mut delete_run_id);
+                    ui.spacing();
+                }
+            }
+        }
+
+        let unmatched: Vec<RouteRecord> = self.records.iter()
+            .copied()
+            .filter(|rec| !categories::ALL_CATEGORIES.iter().any(|cat| cat.matches(rec.from_map_id, rec.run_map_id, rec.to_map_id)))
+            .collect();
+
+        if !unmatched.is_empty() {
+            let header_title = "Other / Custom Runs##cat_other";
+            let is_open = ui.collapsing_header(header_title, TreeNodeFlags::empty());
+            let rect_min = ui.item_rect_min();
+            let rect_max = ui.item_rect_max();
+            let title_size = ui.calc_text_size("Other / Custom Runs");
+
+            let x = rect_min[0] + title_size[0] + 32.0;
+            let y = rect_min[1] + (rect_max[1] - rect_min[1] - title_size[1]) * 0.5;
+
+            let draw_list = ui.get_window_draw_list();
+            let text_gray = [0.6, 0.6, 0.6, 1.0];
+            let label = format!("[Zones: {}]", unmatched.len());
+            draw_list.add_text([x, y], text_gray, label);
+
+            if is_open {
+                self.render_records_subtable(ui, edit, &unmatched, "other", &mut delete_run_id);
+                ui.spacing();
+            }
+        }
+
+        if let Some(id) = delete_run_id {
+            if let Some(log) = &self.run_log {
+                let _ = log.delete_run(id);
+            }
+            self.refresh_records();
+        }
+    }
+
+    fn render_records_subtable(
+        &mut self,
+        ui: &imgui::Ui,
+        edit: bool,
+        records: &[RouteRecord],
+        cat_key: &str,
+        delete_run_id: &mut Option<i64>,
+    ) {
         let time_width = ui.calc_text_size("00:00.00")[0] + 5.0;
         let runs_width = ui.calc_text_size("Runs")[0] + 10.0;
         let actions_width = if edit {
@@ -185,8 +294,9 @@ impl ZoneTimer {
         } else {
             1.0
         };
+        let table_id = format!("records_table_{cat_key}");
         let table = ui.begin_table_header_with_flags(
-            "personal_records",
+            table_id,
             [
                 TableColumnSetup {
                     flags: TableColumnFlags::WIDTH_FIXED,
@@ -227,12 +337,12 @@ impl ZoneTimer {
             TableFlags::SIZING_FIXED_FIT,
         );
         if let Some(_table) = table {
-            for rec in &self.records {
+            for rec in records {
                 ui.table_next_row();
                 ui.table_next_column();
 
                 let route_from_name = map_names::map_name_by_id(rec.from_map_id);
-                let is_open = ui.tree_node_config(format!("{route_from_name}##node_{}_{}_{}", rec.from_map_id, rec.run_map_id, rec.to_map_id))
+                let is_open = ui.tree_node_config(format!("{route_from_name}##node_{cat_key}_{}_{}_{}", rec.from_map_id, rec.run_map_id, rec.to_map_id))
                     .push();
 
                 ui.table_next_column();
@@ -248,7 +358,7 @@ impl ZoneTimer {
                 ui.table_next_column();
                 if edit {
                     let _btn_color = ui.push_style_color(StyleColor::Text, [0.9, 0.4, 0.4, 1.0]);
-                    if ui.small_button(format!("x##del_route_{}_{}_{}", rec.from_map_id, rec.run_map_id, rec.to_map_id)) {
+                    if ui.small_button(format!("x##del_route_{cat_key}_{}_{}_{}", rec.from_map_id, rec.run_map_id, rec.to_map_id)) {
                         self.pending_delete_route = Some((rec.from_map_id, rec.run_map_id, rec.to_map_id));
                         self.confirm_delete_route = true;
                     }
@@ -258,18 +368,26 @@ impl ZoneTimer {
                     }
 
                     ui.same_line();
-                    let is_pinned = self.pinned_route == Some((rec.from_map_id, rec.run_map_id, rec.to_map_id));
+                    let is_pinned = self.pinned_target == Some(PinnedTarget::Route {
+                        from: rec.from_map_id,
+                        run: rec.run_map_id,
+                        to: rec.to_map_id,
+                    });
                     let pin_color = if is_pinned {
                         [0.2, 0.9, 0.35, 1.0]
                     } else {
                         [0.7, 0.7, 0.7, 1.0]
                     };
                     let _pin_btn_color = ui.push_style_color(StyleColor::Text, pin_color);
-                    if ui.small_button(format!("Pin##pin_route_{}_{}_{}", rec.from_map_id, rec.run_map_id, rec.to_map_id)) {
+                    if ui.small_button(format!("Pin##pin_route_{cat_key}_{}_{}_{}", rec.from_map_id, rec.run_map_id, rec.to_map_id)) {
                         if is_pinned {
-                            self.pinned_route = None;
+                            self.pinned_target = None;
                         } else {
-                            self.pinned_route = Some((rec.from_map_id, rec.run_map_id, rec.to_map_id));
+                            self.pinned_target = Some(PinnedTarget::Route {
+                                from: rec.from_map_id,
+                                run: rec.run_map_id,
+                                to: rec.to_map_id,
+                            });
                         }
                     }
                     drop(_pin_btn_color);
@@ -308,8 +426,8 @@ impl ZoneTimer {
                                 ui.table_next_column();
                                 if edit {
                                     let _btn_color = ui.push_style_color(StyleColor::Text, [0.9, 0.4, 0.4, 1.0]);
-                                    if ui.small_button(format!("x##del_run_{}", run.id)) {
-                                        delete_run_id = Some(run.id);
+                                    if ui.small_button(format!("x##del_run_{cat_key}_{}", run.id)) {
+                                        *delete_run_id = Some(run.id);
                                     }
                                     drop(_btn_color);
                                     if ui.is_item_hovered() {
@@ -321,13 +439,6 @@ impl ZoneTimer {
                     }
                 }
             }
-        }
-
-        if let Some(id) = delete_run_id {
-            if let Some(log) = &self.run_log {
-                let _ = log.delete_run(id);
-            }
-            self.refresh_records();
         }
     }
 
@@ -576,9 +687,21 @@ impl ImguiRenderLoop for ZoneTimer {
                     font.pop();
                 }
 
-                if let Some((p_from, p_run, p_to)) = self.pinned_route {
-                    if let Some(rec) = self.records.iter().find(|r| r.from_map_id == p_from && r.run_map_id == p_run && r.to_map_id == p_to) {
-                        ui.text_colored([0.2, 0.9, 0.35, 1.0], format!("PB: {}", format_duration(rec.pb)));
+                if let Some(target) = &self.pinned_target {
+                    match target {
+                        PinnedTarget::Route { from, run, to } => {
+                            if let Some(rec) = self.records.iter().find(|r| r.from_map_id == *from && r.run_map_id == *run && r.to_map_id == *to) {
+                                ui.text_colored([0.2, 0.9, 0.35, 1.0], format!("PB: {}", format_duration(rec.pb)));
+                            }
+                        }
+                        PinnedTarget::Category(cat_name) => {
+                            if let Some(cat) = categories::ALL_CATEGORIES.iter().find(|c| c.name == *cat_name) {
+                                let summary = cat.summarize(&self.records);
+                                if summary.total_pb > Duration::ZERO {
+                                    ui.text_colored([0.2, 0.9, 0.35, 1.0], format!("PB ({}): {}", cat.name, format_duration(summary.total_pb)));
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -708,8 +831,8 @@ impl ImguiRenderLoop for ZoneTimer {
                     if let Some(log) = &self.run_log {
                         let _ = log.delete_route(from, run, to);
                     }
-                    if self.pinned_route == Some((from, run, to)) {
-                        self.pinned_route = None;
+                    if self.pinned_target == Some(PinnedTarget::Route { from, run, to }) {
+                        self.pinned_target = None;
                     }
                     self.refresh_records();
                     self.pending_delete_route = None;
