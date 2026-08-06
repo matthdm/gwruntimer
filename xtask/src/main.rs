@@ -77,12 +77,12 @@ fn compress(artifacts: &[std::path::PathBuf], zip: &Path) -> Result<(), String> 
         .collect::<Vec<_>>()
         .join(",");
     let script = format!(
-        "Compress-Archive -Path {paths} -DestinationPath '{}' -Force",
+        "Import-Module Microsoft.PowerShell.Archive -ErrorAction SilentlyContinue; Compress-Archive -Path {paths} -DestinationPath '{}' -Force",
         zip.display()
     );
 
     let status = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &script])
         .status()
         .map_err(|e| format!("failed to run powershell: {e}"))?;
     if !status.success() {
