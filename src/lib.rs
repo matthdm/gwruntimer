@@ -94,6 +94,8 @@ struct ZoneTimer {
     /// Edit-mode state from the previous frame, for detecting enter/leave.
     was_edit: bool,
 
+    in_full_edit_mode: bool,
+
     show_inst_timer: bool,
 
     state: ZoneTimerState,
@@ -121,6 +123,7 @@ impl Default for ZoneTimer {
             pinned_target: PinnedTarget::None,
             show_inst_timer: false,
             was_edit: false,
+            in_full_edit_mode: false,
             state: ZoneTimerState {
                 last_load_state: false,
                 mapid_before_run: 0,
@@ -437,10 +440,10 @@ fn render_records_subtable(
                 }
 
                 ui.same_line();
-                let pin_color = if let PinnedTarget::None = *pinned_target {
-                    [0.2, 0.9, 0.35, 1.0]
-                } else {
+                let pin_color = if let PinnedTarget::Route(pinned_rec) = *pinned_target && *rec == pinned_rec {
                     [0.7, 0.7, 0.7, 1.0]
+                } else {
+                    [0.2, 0.9, 0.35, 1.0]
                 };
                 let _pin_btn_color = ui.push_style_color(StyleColor::Text, pin_color);
                 if ui.small_button(format!("Pin##pin_route_{cat_key}_{}_{}_{}", rec.from_map_id, rec.run_map_id, rec.to_map_id)) {
@@ -603,35 +606,42 @@ impl ImguiRenderLoop for ZoneTimer {
         }
 
         // The edit chord unlocks dragging and the context menu.
-        let edit = ui.io().key_ctrl && ui.io().key_shift;
+        let edit_modifier_keys = ui.io().key_ctrl && ui.io().key_shift;
+        let edit = edit_modifier_keys || self.in_full_edit_mode;
         let entered_edit = edit && !self.was_edit;
         let left_edit = !edit && self.was_edit;
         self.was_edit = edit;
+
+        let overlay_flags = WindowFlags::NO_RESIZE | WindowFlags::NO_MOVE | WindowFlags::NO_INPUTS | WindowFlags::NO_COLLAPSE;
 
         let mut flags = WindowFlags::NO_SCROLLBAR
             | WindowFlags::NO_COLLAPSE
             | WindowFlags::NO_SAVED_SETTINGS
             | WindowFlags::ALWAYS_AUTO_RESIZE;
         if !edit {
-            flags |= WindowFlags::NO_RESIZE | WindowFlags::NO_MOVE | WindowFlags::NO_INPUTS;
-            if !self.show_log {
-                flags |= WindowFlags::NO_TITLE_BAR;
-            }
+            flags |= overlay_flags | WindowFlags::NO_TITLE_BAR;
         }
 
         let pos_cond = if edit { Condition::Appearing } else { Condition::Always };
 
-        let mut win = ui
+        if self.show_log {
+            let mut show_log = self.show_log;
+            ui.window("Session Log##session_log")
+                //.opened(&mut show_log)
+                .size_constraints([640.0, 400.0], [f32::MAX, f32::MAX])
+                .flags(if edit { WindowFlags::empty() } else { overlay_flags })
+                .build(|| {
+                    self.render_session_table(ui);
+                });
+            self.show_log = show_log;
+        }
+
+        let mut timer_win = ui
             .window(format!("KAOS' Zone Timer (r{}:{})##zone_timer", version::GIT_REVISION, version::GIT_HASH))
             .position(self.pos, pos_cond)
             .focused(entered_edit)
-            .flags(flags);
-
-        if self.show_log {
-            win = win.size_constraints([640.0, 400.0], [f32::MAX, f32::MAX]);
-        }
-
-        win.build(|| {
+            .flags(flags)
+            .build(|| {
             let color = if self.is_running() {
                 [1.0, 1.0, 1.0, 1.0]
             } else {
@@ -660,40 +670,25 @@ impl ImguiRenderLoop for ZoneTimer {
                 self.pos = ui.window_pos();
             }
 
-            if edit || self.show_log {
-                ui.separator();
-                unsafe {
-                    imgui::sys::igSetNextItemOpen(self.show_log, Condition::Always as i32);
-                }
-                let header_colors = (!edit).then(|| {
-                    let bg = ui.style_color(StyleColor::WindowBg);
-                    [
-                        ui.push_style_color(StyleColor::Header, bg),
-                        ui.push_style_color(StyleColor::HeaderHovered, bg),
-                        ui.push_style_color(StyleColor::HeaderActive, bg),
-                    ]
-                });
-                self.show_log = ui.collapsing_header("Session Log", TreeNodeFlags::empty());
-                drop(header_colors);
-
-                if self.show_log {
-                    self.render_session_table(ui);
-                }
-            }
 
             if edit {
                 if let Some(_menu) = ui.begin_popup_context_window() {
-                    if ui.menu_item_config("Personal Records").selected(self.show_records).build() {
-                        self.show_records = !self.show_records;
-                    }
 
                     if ui.menu_item_config("Show Instance Time").selected(self.show_inst_timer).build() {
                         self.show_inst_timer = !self.show_inst_timer;
                     }
+                    
+                    ui.separator();
 
-                    if ui.menu_item_config("Clear Log").build() {
-                        self.session_runs.clear();
+                    if ui.menu_item_config("Session Log").selected(self.show_log).build() {
+                        self.show_log = !self.show_log;
                     }
+                    if ui.menu_item_config("Personal Records").selected(self.show_records).build() {
+                        self.show_records = !self.show_records;
+                    }
+
+                    ui.separator();
+
                     if ui.menu_item_config("Exit Timer").build() {
                         self.confirm_exit = true;
                     }
@@ -732,9 +727,9 @@ impl ImguiRenderLoop for ZoneTimer {
                 rec_flags |= WindowFlags::NO_MOVE | WindowFlags::NO_RESIZE;
             }
             ui.window("Personal Records##records_window")
-                .opened(&mut opened)
+                //.opened(&mut opened)
                 .size([840.0, 480.0], Condition::FirstUseEver)
-                .flags(rec_flags)
+                .flags(if edit { WindowFlags::empty() } else { overlay_flags })
                 .build(|| {
                     self.render_records_table(ui, edit);
                 });
@@ -783,14 +778,13 @@ impl ImguiRenderLoop for ZoneTimer {
     }
 
     fn message_filter(&self, io: &imgui::Io) -> hudhook::MessageFilter {
-        let mut filter = hudhook::MessageFilter::empty();
-        if io.want_capture_mouse {
-            filter |= hudhook::MessageFilter::InputMouse;
+        let quick_edit_keys_down = io.key_ctrl && io.key_shift;
+        if quick_edit_keys_down || self.in_full_edit_mode { 
+            hudhook::MessageFilter::InputAll | hudhook::MessageFilter::WindowAll
         }
-        if io.want_capture_keyboard {
-            filter |= hudhook::MessageFilter::InputKeyboard;
+        else {
+            hudhook::MessageFilter::empty()
         }
-        filter
     }
 }
 
