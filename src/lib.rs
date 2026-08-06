@@ -24,11 +24,10 @@ use run_log::{RouteRecord, RunEntry};
 use categories::CategorySummary;
 
 /// Target that can be pinned to display its PB on the main timer readout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PinnedTarget {
-    #[default]
     None,
-    Route { from: u32, run: u32, to: u32 },
+    Route(RouteRecord),
 }
 
 /// Pixel size of the large timer font, loaded once in `initialize`.
@@ -119,7 +118,7 @@ impl Default for ZoneTimer {
             confirm_exit: false,
             pending_delete_route: None,
             confirm_delete_route: false,
-            pinned_target: PinnedTarget::default(),
+            pinned_target: PinnedTarget::None,
             show_inst_timer: false,
             was_edit: false,
             state: ZoneTimerState {
@@ -438,34 +437,21 @@ fn render_records_subtable(
                 }
 
                 ui.same_line();
-                let is_pinned = *pinned_target == PinnedTarget::Route {
-                    from: rec.from_map_id,
-                    run: rec.run_map_id,
-                    to: rec.to_map_id,
-                };
-                let pin_color = if is_pinned {
+                let pin_color = if let PinnedTarget::None = *pinned_target {
                     [0.2, 0.9, 0.35, 1.0]
                 } else {
                     [0.7, 0.7, 0.7, 1.0]
                 };
                 let _pin_btn_color = ui.push_style_color(StyleColor::Text, pin_color);
                 if ui.small_button(format!("Pin##pin_route_{cat_key}_{}_{}_{}", rec.from_map_id, rec.run_map_id, rec.to_map_id)) {
-                    if is_pinned {
-                        *pinned_target = PinnedTarget::None;
-                    } else {
-                        *pinned_target = PinnedTarget::Route {
-                            from: rec.from_map_id,
-                            run: rec.run_map_id,
-                            to: rec.to_map_id,
-                        };
-                    }
+                    *pinned_target = PinnedTarget::Route(*rec);
                 }
                 drop(_pin_btn_color);
                 if ui.is_item_hovered() {
-                    if is_pinned {
-                        ui.tooltip_text("Unpin PB from timer");
-                    } else {
+                    if let PinnedTarget::None = *pinned_target {
                         ui.tooltip_text("Pin PB under timer");
+                    } else {
+                        ui.tooltip_text("Unpin PB from timer");
                     }
                 }
             }
@@ -659,10 +645,8 @@ impl ImguiRenderLoop for ZoneTimer {
 
             match self.pinned_target {
                 PinnedTarget::None => {}
-                PinnedTarget::Route { from, run, to } => {
-                    if let Some(rec) = self.records.iter().find(|r| r.from_map_id == from && r.run_map_id == run && r.to_map_id == to) {
-                        ui.text_colored([0.2, 0.9, 0.35, 1.0], format!("PB: {}", format_duration(rec.pb)));
-                    }
+                PinnedTarget::Route (rec) => {
+                     ui.text_colored([0.2, 0.9, 0.35, 1.0], format!("PB: {}", format_duration(rec.pb)));
                 }
             }
 
@@ -776,9 +760,9 @@ impl ImguiRenderLoop for ZoneTimer {
                     if let Some(log) = &self.run_log {
                         let _ = log.delete_route(from, run, to);
                     }
-                    if self.pinned_target == (PinnedTarget::Route { from, run, to }) {
-                        self.pinned_target = PinnedTarget::None;
-                    }
+                    // if self.pinned_target == (PinnedTarget::Route { from, run, to }) {
+                    //     self.pinned_target = PinnedTarget::None;
+                    // }
                     self.refresh_records();
                     self.pending_delete_route = None;
                     ui.close_current_popup();
