@@ -2,9 +2,9 @@
 //!
 //! A "run" is a single trip: we zone out of one map, run through a second map,
 //! and port into a third. The log records the three map ids and how long the
-//! run took. Map ids are the game's raw `u32` identifiers; a future table will
-//! map those to English names.
+//! run took. Map ids are the game's raw `u32` identifiers.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -45,14 +45,21 @@ pub struct RouteRecord {
     pub avg: Duration,
 }
 
+/// In-memory cache holding loaded records and route run histories to prevent
+/// per-frame database queries.
+#[derive(Default, Debug, Clone)]
+pub struct LogCache {
+    pub records: Vec<RouteRecord>,
+    pub runs_by_route: HashMap<(u32, u32, u32), Vec<RunEntry>>,
+}
+
 /// The run log.
 ///
-/// The SQLite connection lives behind a [`Mutex`] so the whole type is
-/// `Send + Sync` (rusqlite's `Connection` is `Send` but not `Sync`). That lets
-/// it be stored directly inside the imgui render loop, which hudhook requires
-/// to be both.
+/// The SQLite connection and in-memory cache live behind [`Mutex`]es so the whole
+/// type is `Send + Sync`. That lets it be stored directly inside the imgui render loop.
 pub struct RunLog {
     conn: Mutex<Connection>,
+    cache: Mutex<LogCache>,
 }
 
 impl RunLog {
@@ -84,11 +91,88 @@ impl RunLog {
             )",
             [],
         )?;
-        Ok(Self { conn: Mutex::new(conn) })
+
+        let log = Self {
+            conn: Mutex::new(conn),
+            cache: Mutex::new(LogCache::default()),
+        };
+        log.refresh_cache()?;
+        Ok(log)
+    }
+
+    /// Explicitly refresh the in-memory cache by querying SQLite once.
+    pub fn refresh_cache(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+
+        // 1. Fetch aggregated records sorted by initial logged order.
+        let mut rec_stmt = conn.prepare(
+            "SELECT from_map_id, run_map_id, to_map_id,
+                    COUNT(*) AS run_count,
+                    MIN(duration_ms) AS pb_ms,
+                    CAST(AVG(duration_ms) AS INTEGER) AS avg_ms
+             FROM runs
+             WHERE from_map_id != to_map_id
+             GROUP BY from_map_id, run_map_id, to_map_id
+             ORDER BY MIN(id) ASC",
+        )?;
+        let records: Vec<RouteRecord> = rec_stmt.query_map([], |row| {
+            Ok(RouteRecord {
+                from_map_id: row.get("from_map_id")?,
+                run_map_id: row.get("run_map_id")?,
+                to_map_id: row.get("to_map_id")?,
+                run_count: row.get::<_, i64>("run_count")? as u64,
+                pb: Duration::from_millis(row.get::<_, i64>("pb_ms")? as u64),
+                avg: Duration::from_millis(row.get::<_, i64>("avg_ms")? as u64),
+            })
+        })?.collect::<Result<_, _>>()?;
+
+        // 2. Fetch all runs sorted by duration ASC, completed_at DESC, grouped by route.
+        let mut runs_stmt = conn.prepare(
+            "SELECT id, from_map_id, run_map_id, to_map_id, duration_ms, completed_at
+             FROM runs
+             ORDER BY duration_ms ASC, completed_at DESC",
+        )?;
+        let all_runs: Vec<RunEntry> = runs_stmt.query_map([], row_to_entry)?.collect::<Result<_, _>>()?;
+
+        let mut runs_by_route: HashMap<(u32, u32, u32), Vec<RunEntry>> = HashMap::new();
+        for entry in all_runs {
+            runs_by_route
+                .entry((entry.from_map_id, entry.run_map_id, entry.to_map_id))
+                .or_default()
+                .push(entry);
+        }
+
+        let mut cache = self.cache.lock().unwrap();
+        cache.records = records;
+        cache.runs_by_route = runs_by_route;
+
+        Ok(())
+    }
+
+    /// Retrieve the cached aggregated route records.
+    pub fn cached_records(&self) -> Vec<RouteRecord> {
+        self.cache.lock().unwrap().records.clone()
+    }
+
+    /// Retrieve the entire cached map of route histories.
+    pub fn cached_route_history(&self) -> HashMap<(u32, u32, u32), Vec<RunEntry>> {
+        self.cache.lock().unwrap().runs_by_route.clone()
+    }
+
+    /// Retrieve cached runs for a specific route.
+    #[allow(dead_code)]
+    pub fn cached_runs_for_route(&self, from_map_id: u32, run_map_id: u32, to_map_id: u32) -> Vec<RunEntry> {
+        self.cache
+            .lock()
+            .unwrap()
+            .runs_by_route
+            .get(&(from_map_id, run_map_id, to_map_id))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Record a completed run, stamping the completion time as "now". Returns
-    /// the stored entry (including its new row id).
+    /// the stored entry (including its new row id). Automatically refreshes cache.
     pub fn log_run(
         &self,
         from_map_id: u32,
@@ -98,20 +182,26 @@ impl RunLog {
     ) -> Result<RunEntry> {
         let completed_at = SystemTime::now();
         let duration_ms = duration.as_millis() as i64;
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO runs (from_map_id, run_map_id, to_map_id, duration_ms, completed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                from_map_id,
-                run_map_id,
-                to_map_id,
-                duration_ms,
-                unix_seconds(completed_at)
-            ],
-        )?;
+        let id = {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO runs (from_map_id, run_map_id, to_map_id, duration_ms, completed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    from_map_id,
+                    run_map_id,
+                    to_map_id,
+                    duration_ms,
+                    unix_seconds(completed_at)
+                ],
+            )?;
+            conn.last_insert_rowid()
+        };
+
+        let _ = self.refresh_cache();
+
         Ok(RunEntry {
-            id: conn.last_insert_rowid(),
+            id,
             from_map_id,
             run_map_id,
             to_map_id,
@@ -121,6 +211,7 @@ impl RunLog {
     }
 
     /// All logged runs, newest first.
+    #[allow(dead_code)]
     pub fn all(&self) -> Result<Vec<RunEntry>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -131,6 +222,7 @@ impl RunLog {
     }
 
     /// The `limit` most recent runs, newest first.
+    #[allow(dead_code)]
     pub fn recent(&self, limit: usize) -> Result<Vec<RunEntry>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -140,65 +232,44 @@ impl RunLog {
         stmt.query_map(params![limit as i64], row_to_entry)?.collect()
     }
 
-    /// Aggregated route records, sorted by the order they were initially logged (first run).
-    /// Runs where the start and end map are identical (e.g. accidental re-entry) are excluded.
+    /// Aggregated route records, returned directly from the in-memory cache.
+    #[allow(dead_code)]
     pub fn records(&self) -> Result<Vec<RouteRecord>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT from_map_id, run_map_id, to_map_id,
-                    COUNT(*) AS run_count,
-                    MIN(duration_ms) AS pb_ms,
-                    CAST(AVG(duration_ms) AS INTEGER) AS avg_ms
-             FROM runs
-             WHERE from_map_id != to_map_id
-             GROUP BY from_map_id, run_map_id, to_map_id
-             ORDER BY MIN(id) ASC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(RouteRecord {
-                from_map_id: row.get("from_map_id")?,
-                run_map_id: row.get("run_map_id")?,
-                to_map_id: row.get("to_map_id")?,
-                run_count: row.get::<_, i64>("run_count")? as u64,
-                pb: Duration::from_millis(row.get::<_, i64>("pb_ms")? as u64),
-                avg: Duration::from_millis(row.get::<_, i64>("avg_ms")? as u64),
-            })
-        })?;
-        rows.collect()
+        Ok(self.cached_records())
     }
 
-    /// All runs for a specific route, fastest first.
+    /// All runs for a specific route, returned directly from the in-memory cache.
+    #[allow(dead_code)]
     pub fn runs_for_route(&self, from_map_id: u32, run_map_id: u32, to_map_id: u32) -> Result<Vec<RunEntry>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, from_map_id, run_map_id, to_map_id, duration_ms, completed_at
-             FROM runs
-             WHERE from_map_id = ?1 AND run_map_id = ?2 AND to_map_id = ?3
-             ORDER BY duration_ms ASC, completed_at DESC",
-        )?;
-        stmt.query_map(params![from_map_id, run_map_id, to_map_id], row_to_entry)?
-            .collect()
+        Ok(self.cached_runs_for_route(from_map_id, run_map_id, to_map_id))
     }
 
-    /// Delete a single run by its row ID.
+    /// Delete a single run by its row ID and update cache.
     pub fn delete_run(&self, id: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM runs WHERE id = ?1", params![id])?;
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute("DELETE FROM runs WHERE id = ?1", params![id])?;
+        }
+        self.refresh_cache()?;
         Ok(())
     }
 
-    /// Delete all recorded runs for a specific route.
+    /// Delete all recorded runs for a specific route and update cache.
     pub fn delete_route(&self, from_map_id: u32, run_map_id: u32, to_map_id: u32) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "DELETE FROM runs WHERE from_map_id = ?1 AND run_map_id = ?2 AND to_map_id = ?3",
-            params![from_map_id, run_map_id, to_map_id],
-        )?;
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "DELETE FROM runs WHERE from_map_id = ?1 AND run_map_id = ?2 AND to_map_id = ?3",
+                params![from_map_id, run_map_id, to_map_id],
+            )?;
+        }
+        self.refresh_cache()?;
         Ok(())
     }
 
     /// Default on-disk location: `%LOCALAPPDATA%\kaos_zone_timer\zone_runs.db`,
     /// falling back to the current directory if `LOCALAPPDATA` is unset.
+    #[allow(dead_code)]
     pub fn default_path() -> PathBuf {
         let base = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)

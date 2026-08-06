@@ -1,30 +1,21 @@
 use std::time::Duration;
-use crate::map_names;
 use crate::run_log::RouteRecord;
 
 pub struct RunCategory {
     pub name: &'static str,
-    pub zones: &'static [&'static str],
-    pub exclude_explorables: &'static [&'static str],
+    pub zones: &'static [u32],
+    pub exclude_explorables: &'static [u32],
 }
 
 impl RunCategory {
+    #[inline]
     pub fn matches(&self, from_map_id: u32, run_map_id: u32, to_map_id: u32) -> bool {
-        let from_name = map_names::map_name_by_id(from_map_id);
-        let run_name = map_names::map_name_by_id(run_map_id);
-        let to_name = map_names::map_name_by_id(to_map_id);
-
-        let norm_run = normalize(run_name);
-        if self.exclude_explorables.iter().any(|&z| normalize(z) == norm_run) {
+        if self.exclude_explorables.contains(&run_map_id) {
             return false;
         }
-
-        self.contains_zone(from_name) && self.contains_zone(run_name) && self.contains_zone(to_name)
-    }
-
-    fn contains_zone(&self, name: &str) -> bool {
-        let norm_target = normalize(name);
-        self.zones.iter().any(|&z| normalize(z) == norm_target)
+        self.zones.contains(&from_map_id)
+            && self.zones.contains(&run_map_id)
+            && self.zones.contains(&to_map_id)
     }
 
     /// Calculate summary statistics for all matching route records in this category.
@@ -51,6 +42,7 @@ impl RunCategory {
     }
 }
 
+#[derive(Clone, Debug, Default)]
 pub struct CategorySummary {
     pub records: Vec<RouteRecord>,
     pub total_pb: Duration,
@@ -58,349 +50,356 @@ pub struct CategorySummary {
     pub zone_count: usize,
 }
 
-fn normalize(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(|c| c.to_lowercase())
-        .collect()
-}
-
 pub static ALL_CATEGORIES: &[RunCategory] = &[
     RunCategory {
-        name: "Ascalon <-> Lion's Arch",
+        name: "Ascalon",
         zones: &[
-            "Ascalon City",
-            "Old Ascalon",
-            "Sardelac Sanitarium",
-            "The Breach",
-            "Piken Square",
-            "Diessa Lowlands",
-            "Grendich Courthouse",
-            "Nolani Academy",
-            "Ascalon Foothills",
-            "Traveler's Vale",
-            "Yak's Bend",
-            "Borlis Pass",
-            "Iron Horse Mine",
-            "Anvil Rock",
-            "Ice Tooth Cave",
-            "The Frost Gate",
-            "Deldrimor Bowl",
-            "Beacon's Perch",
-            "Griffon's Mouth",
-            "Scoundrel's Rise",
-            "Gates of Kryta",
-            "North Kryta Province",
-            "Lion's Arch",
+            81, 148, 811, // Ascalon City
+            33,           // Old Ascalon
+            131,          // Serenity Temple
+            107,          // Eastern Frontier
+            104,          // Pockmark Flats
+            29, 166,      // Fort Ranik
+            101, 162,     // Regent Valley
+            30,           // Ruins of Surmia
+            135,          // Frontier Gate
+            28,           // The Great Northern Wall
+            39,           // Sardelac Sanitarium
+            102,          // The Breach
+            40, 779,      // Piken Square
+            13,           // Diessa Lowlands
+            36, 729,      // Grendich Courthouse
+            32,           // Nolani Academy
+            103,          // Ascalon Foothills
+            54,           // Scoundrel's Rise
+            14,           // Gates of Kryta
+            58,           // North Kryta Province
+            55, 385, 808, 809, 810, 844, // Lion's Arch
         ],
         exclude_explorables: &[],
     },
     RunCategory {
-        name: "Lion's Arch -> Temple of the Ages",
+        name: "Northern Shiverpeaks",
         zones: &[
-            "Lion's Arch",
-            "North Kryta Province",
-            "Nebo Terrace",
-            "Bergen Hot Springs",
-            "Beetletun",
-            "Cursed Lands",
-            "The Black Curtain",
-            "Temple of the Ages",
+            99,           // Traveler's Vale
+            134,          // Yak's Bend
+            25,           // Borlis Pass
+            88,           // Iron Horse Mine
+            89,           // Anvil Rock
+            132,          // Ice Tooth Cave
+            21,           // The Frost Gate
+            100,          // Deldrimor Bowl
+            133,          // Beacon's Perch
+            27,           // Griffon's Mouth
         ],
         exclude_explorables: &[],
     },
     RunCategory {
-        name: "Temple of the Ages -> Sanctum Cay",
+        name: "Kryta",
         zones: &[
-            "Temple of the Ages",
-            "The Black Curtain",
-            "Talmark Wilderness",
-            "Tears of the Fallen",
-            "Fisherman's Haven",
-            "Fishermen's Haven",
-            "Stingray Strand",
-            "Sanctum Cay",
+            55, 385, 808, 809, 810, 844, // Lion's Arch
+            15, 841,      // D'Alessio Seaboard
+            58,           // North Kryta Province
+            59,           // Nebo Terrace
+            57,           // Bergen Hot Springs
+            136, 846, 850,// Beetletun
+            56,           // Cursed Lands
+            18,           // The Black Curtain
+            138, 788,     // Temple of the Ages
+            62, 849, 853, // Watchtower Coast
+            16, 839,      // Divinity Coast
+            17, 837,      // Talmark Wilderness
+            53,           // Tears of the Fallen
+            63,           // Stingray Strand
+            137,          // Fishermen's Haven
+            19,           // Sanctum Cay
+            61,           // Twin Serpent Lakes
+            73, 843,      // Riverside Province
         ],
         exclude_explorables: &[],
     },
     RunCategory {
-        name: "Maguuma Tour",
+        name: "Maguuma",
         zones: &[
-            "Talmark Wilderness",
-            "Majesty's Rest",
-            "Sage Lands",
-            "Druid's Overlook",
-            "The Wilderness",
-            "The Wilds",
-            "Mamnoon Lagoon",
-            "Bloodstone Fen",
-            "Silverwood",
-            "Quarrel Falls",
-            "Ettin's Back",
-            "Ventari's Refuge",
-            "Aurora Glade",
-            "Dry Top",
-            "Henge of Denravi",
-            "Tangle Root",
-            "Maguuma Stade",
+            60, 848, 852, // Majesty's Rest
+            41,           // Sage Lands
+            140,          // Druid's Overlook
+            11,           // The Wilds / The Wilderness
+            42,           // Mamnoon Lagoon
+            10, 471,      // Bloodstone Fen
+            43,           // Silverwood
+            142,          // Quarrel Falls
+            44,           // Ettin's Back
+            139,          // Ventari's Refuge
+            12, 847, 851, // Aurora Glade
+            47,           // Dry Top
+            49,           // Henge of Denravi
+            48,           // Tangle Root
+            141,          // Maguuma Stade
         ],
         exclude_explorables: &[],
     },
     RunCategory {
-        name: "Droks Run",
+        name: "Southern Shiverpeaks",
         zones: &[
-            "Lion's Arch",
-            "North Kryta Province",
-            "Scoundrel's Rise",
-            "Griffon's Mouth",
-            "Deldrimor Bowl",
-            "Beacon's Perch",
-            "Lornar's Pass",
-            "Dreadnought's Drift",
-            "Snake Dance",
-            "Camp Rankor",
-            "Talus Chute",
-            "Droknar's Forge",
-        ],
-        exclude_explorables: &[],
-    },
-    RunCategory {
-        name: "Shiverpeaks Tour",
-        zones: &[
-            "Droknar's Forge",
-            "Talus Chute",
-            "Icedome",
-            "Frozen Forest",
-            "Iron Mines of Moladune",
-            "Thunderhead Keep",
-            "Ice Floe",
-            "Marhan's Grotto",
-            "Witman's Folly",
-            "Port Sledge",
-            "Camp Rankor",
-            "Snake Dance",
-            "Snake's Dance",
-            "Grenth's Footprint",
-            "Deldrimor War Camp",
-            "Spearhead Peak",
-            "The Granite Citadel",
-            "Copperhammer Mines",
+            133,          // Beacon's Perch
+            90,           // Lornar's Pass
+            97,           // Dreadnought's Drift
+            91,           // Snake Dance
+            155,          // Camp Rankor
+            26,           // Talus Chute
+            20, 783, 812, 813, // Droknar's Forge
+            87,           // Icedome
+            98,           // Frozen Forest
+            24,           // Iron Mines of Moladune
+            23,           // Thunderhead Keep
+            94,           // Ice Floe
+            157,          // Marhan's Grotto
+            95,           // Witman's Folly
+            158,          // Port Sledge
+            155,          // Camp Rankor
+            91,           // Snake Dance
+            191,          // Grenth's Footprint
+            206,          // Deldrimor War Camp
+            93,           // Spearhead Peak
+            156,          // The Granite Citadel
+            159,          // Copperhammer Mines
         ],
         exclude_explorables: &[
-            "Iron Mines of Moladune",
+            24,           // Iron Mines of Moladune
         ],
     },
     RunCategory {
-        name: "Desert Tour",
+        name: "Crystal Desert",
         zones: &[
-            "The Amnoon Oasis",
-            "Amnoon Oasis",
-            "Prophets Path",
-            "Prophet's Path",
-            "Heroes' Audience",
-            "Augury Rock",
-            "Vulture Drifts",
-            "Dunes of Despair",
-            "Skyward Reach",
-            "Destiny's Gorge",
-            "Diviner's Ascent",
-            "Elona Reach",
-            "Salt Flats",
-            "Seeker's Passage",
-            "The Scar",
-            "Thirsty River",
-            "The Arid Sea",
+            109,          // The Amnoon Oasis
+            113,          // Prophet's Path
+            152,          // Heroes' Audience
+            38, 119,      // Augury Rock
+            111,          // Vulture Drifts
+            116,          // Dunes of Despair
+            115,          // Skyward Reach
+            154,          // Destiny's Gorge
+            110,          // Diviner's Ascent
+            118,          // Elona Reach
+            114,          // Salt Flats
+            153,          // Seeker's Passage
+            108,          // The Scar
+            117,          // Thirsty River
+            112,          // The Arid Sea
         ],
         exclude_explorables: &[
-            "Elona Reach",
+            118,          // Elona Reach
         ],
     },
     RunCategory {
-        name: "Factions Rush",
+        name: "Shing Jea",
         zones: &[
-            "Kaineng Center",
-            "Bukdek Byway",
-            "The Marketplace",
-            "Vizunah Square (Foreign Quarter)",
-            "Vizinuh Square (Foreign Quarter)",
-            "Vizunah Square (Local Quarter)",
-            "Vizinuh Square (Local Quarter)",
-            "Xaquang Skyway",
-            "Senji's Corner",
-            "Shenzun Tunnels",
-            "Maatu Keep",
-            "Pongmei Valley",
-            "Zin Ku Corridor",
-            "Sunjiang District",
-            "Tahnnakai Temple",
-            "Boreas Seabed (Mission)",
-            "Zos Shivros Channel",
-            "Boreas Seabed (Explorable)",
-            "Boreas Seabed",
-            "Mount Qinkai",
-            "Breaker Hollow",
-            "Aspenwood Gate (Luxon)",
-            "Fort Aspenwood (Luxon)",
-            "Fort Aspendwood (Luxon)",
-            "Archipelagos",
-            "Jade Flats (Luxon)",
-            "The Jade Quarry (Luxon)",
-            "Cavalon",
-            "Maishang Hills",
-            "Bai Paasu Reach",
-            "Eradon Terrace",
-            "Eredon Terrace",
-            "Gyala Hatchery",
-            "Gyala Haterchy",
-            "Leviathan Pits",
-            "Rhea's Crater",
-            "The Aurios Mines",
-            "Silent Surf",
-            "Seafarer's Rest",
-            "Unwaking Waters",
-            "Harvest Temple",
-            "Morostav Trail",
-            "Durheim Archives",
-            "Amatz Basin",
-            "Mourning Veil Falls",
-            "Vasburg Armory",
-            "The Eternal Grove (Explorable)",
-            "The Eternal Grove",
-            "Lutgardis Conservatory",
-            "Drazach Thicket",
-            "Brauer Academy",
-            "Melandru's Hope",
-            "Jade Flats (Kurzick)",
-            "Saint Anjeka's Shrine",
-            "Ferndale",
-            "Aspenwood Gate (Kurzick)",
-            "House zu Heltzer",
-            "Arborstone",
-            "Altrumm Ruins",
-            "Tanglewood Copse",
-        ],
-        exclude_explorables: &[
-            "Sunjiang District",
-        ],
-    },
-    RunCategory {
-        name: "Bone Palace Run",
-        zones: &[
-            "Yohlon Haven",
-            "Arkjok Ward",
-            "Sunspear Sanctuary",
-            "Turai's Procession",
-            "Gate of Desolation",
-            "The Sulfurous Wastes",
-            "Sulfurous Wastes",
-            "Remains of Sahlahja",
-            "Joko's Domain",
-            "Basalt Grotto",
-            "The Shattered Ravines",
-            "The Alkali Pan",
-            "Bone Palace",
+            242, 505, 815, 816, 871, // Shing Jea Monastery
+            238,                     // Sunqua Vale
+            249, 509, 511, 864,      // Tsumei Village
+            235,                     // Panjiang Peninsula
+            236,                     // Kinya Province
+            251,                     // Ran Musu Gardens
+            214, 245, 257, 512,      // Minister Cho's Estate
+            252,                     // Linnok Courtyard
+            196, 507,                // Jaya Bluffs
+            313,                     // Saoshang Trail
+            250, 508, 510, 865,      // Seitung Harbor
+            213, 246, 258,           // Zen Daijun
+            237, 506,                // Haiju Lagoon
         ],
         exclude_explorables: &[],
     },
     RunCategory {
-        name: "Kodash Run",
+        name: "Cantha",
         zones: &[
-            "Yohlon Haven",
-            "Arkjok Ward",
-            "Sunspear Sanctuary",
-            "Turai's Procession",
-            "Gate of Desolation",
-            "The Sulfurous Wastes",
-            "Sulfurous Wastes",
-            "Remains of Sahlahja",
-            "Joko's Domain",
-            "Basalt Grotto",
-            "Vehjin Mines",
-            "Jennur's Horde",
-            "Forum Highlands",
-            "Tihark Orchard",
-            "The Kodash Bazaar",
+            194, 400, 817, 861, 872, // Kaineng Center
+            225, 233, 270,           // Raisu Palace
+            240, 863,                // Bukdek Byway
+            303, 774, 862,           // The Marketplace
+            292, 305,                // Vizunah Square (Foreign Quarter)
+            291, 304,                // Vizunah Square (Local Quarter)
+            215,                     // Vizunah Square
+            31,                      // Xaquang Skyway
+            51,                      // Senji's Corner
+            197,                     // Shenzun Tunnels
+            283,                     // Maatu Keep
+            211,                     // Pongmei Valley
+            284,                     // Zin Ku Corridor
+            220, 256, 264,           // Sunjiang District
+            217, 261, 269, 866,      // Tahnnakai Temple
+        ],   
+        exclude_explorables: &[            
+            220, 256, 264,           // Sunjiang District
+        ],
+    },
+    RunCategory {
+        name: "The Jade Sea",
+        zones: &[
+            219, 247, 263,// Boreas Seabed
+            273,          // Zos Shivros Channel
+            200,          // Mount Qinkai
+            278,          // Breaker Hollow
+            389,          // Aspenwood Gate (Luxon)
+            221, 293, 324,// Fort Aspenwood (Luxon)
+            198,          // Archipelagos
+            391,          // Jade Flats (Luxon)
+            223, 295, 306,// The Jade Quarry (Luxon)
+            193,          // Cavalon
+            199,          // Maishang Hills
+            288,          // Bai Paasu Reach
+            350,          // Eredon Terrace
+            144, 224, 253, 268, // Gyala Hatchery
+            279,          // Leviathan Pits
+            202,          // Rhea's Crater
+            234,          // The Aurios Mines
+            203,          // Silent Surf
+            289,          // Seafarer's Rest
+            204, 227, 297,// Unwaking Waters (Luxon)
+            277,          // Harvest Temple
+        ],   
+        exclude_explorables: &[],
+    },
+    RunCategory {
+        name: "The Echovald Forest",
+        zones: &[
+            277,          // Harvest Temple
+            204, 227, 298,// Unwaking Waters (Kurzick)
+            205,          // Morostav Trail
+            287, 291,     // Durheim Archives
+            230,          // Amatz Basin
+            209,          // Mourning Veil Falls
+            130,          // Vasburg Armory
+            128, 222, 267,// The Eternal Grove
+            129,          // Lutgardis Conservatory
+            195,          // Drazach Thicket
+            286,          // Brauer Academy
+            201,          // Melandru's Hope
+            390,          // Jade Flats (Kurzick)
+            349,          // Saint Anjeka's Shrine
+            210,          // Ferndale
+            388,          // Aspenwood Gate (Kurzick)
+            77,           // House zu Heltzer
+            218, 244, 262,// Arborstone
+            272, 870,     // Altrumm Ruins
+            348,          // Tanglewood Copse
         ],
         exclude_explorables: &[],
     },
     RunCategory {
-        name: "Vabbi Tour",
+        name: "Istan",
         zones: &[
-            "The Kodash Bazaar",
-            "Forum Highlands",
-            "The Mirror of Lyss",
-            "Mihanu Township",
-            "Grand Court of Sebelkeh",
-            "Dasha Vestibule",
-            "Dzagonur Bastion",
-            "Honur Hill",
-            "Resplendent Makuun",
-            "Yahnur Market",
-            "Vehtendi Valley",
-            "Yatendi Canyons",
-            "Chantry of Secrets",
-            "Wehhan Terraces",
-            "Moddok Crevice",
+            370, 422, 449, 818, 819, 820, // Kamadan, Jewel of Istan
+            456,          // Churrhir Fields
+            544, 556,     // Chahbek Village
+            430,          // Plains of Jarin
+            431,          // Sunspear Great Hall
+            502,          // The Astralarium
+            483,          // Zehlon Reach
+            479,          // Champion's Dawn
+            432, 447,     // Cliffs of Dohjok
+            491, 515,     // Jokanur Diggings
+            492, 516,     // Blacktide Den
+            457, 487,     // Beknur Harbor
+            486,          // Issnur Isles
+            489,          // Kodlonu Hamlet
         ],
         exclude_explorables: &[],
     },
     RunCategory {
-        name: "Kourna Tour",
+        name: "Kourna",
         zones: &[
-            "Yohlon Haven",
-            "Arkjok Ward",
-            "Marga Coast",
-            "Nundu Bay",
-            "Dajkah Inlet",
-            "Sunward Marches",
-            "Venta Cemetery",
-            "Venta Cemetary",
-            "Jahai Bluffs",
-            "Kodonur Crossroads",
-            "Dejarin Estate",
-            "Pogahn Passage",
-            "Camp Hojanu",
-            "The Floodplain of Mahnkelon",
-            "Rilohn Refuge",
+            381,          // Yohlon Haven
+            380,          // Arkjok Ward
+            387,          // Sunspear Sanctuary
+            371,          // Marga Coast
+            477, 523,     // Nundu Bay
+            554,          // Dajkah Inlet
+            373,          // Sunward Marches
+            421,          // Venta Cemetery
+            369,          // Jahai Bluffs
+            424, 458,     // Kodonur Crossroads
+            379,          // Dejarin Estate
+            426, 460,     // Pogahn Passage
+            376,          // Camp Hojanu
+            384,          // The Floodplain of Mahnkelon
+            425, 459,     // Rilohn Refuge
         ],
         exclude_explorables: &[],
     },
     RunCategory {
-        name: "Eye of the North Tour",
+        name: "Desolation",
         zones: &[
-            "Boreal Station",
-            "Ice Cliff Chasms",
-            "Eye of the North",
-            "Norrhart Domains",
-            "Gunnar's Hold",
-            "Bjora Marches",
-            "Longeye's Ledge",
-            "Grothmar Wardowns",
-            "Dalada Uplands",
-            "Doomlore Shrine",
-            "Drakkar Lake",
-            "Sifhalla",
-            "Varajar Fells",
-            "Olafstead",
-            "Verdant Cascades",
-            "Umbral Grotto",
-            "Vloxen Excavations",
-            "Vloxen Excavations (Level 1)",
-            "Vloxen Excavations: Level 1",
-            "Vloxen Excavations: Level 2",
-            "Vloxen Excavations: Level 3",
-            "Vlox's Falls",
-            "Arbor Bay",
-            "Shards of Orr",
-            "Shards of Orr: Level 1",
-            "Shards of Orr: Level 2",
-            "Shards of Orr: Level 3",
-            "Gadd's Encampment",
-            "Alcazia Tangle",
-            "Rata Sum",
-            "Riven Earth",
-            "Tarnished Haven",
-            "Magus Stones",
+            478,          // Gate of Desolation
+            444,          // The Sulfurous Wastes
+            545,          // Remains of Sahlahja
+            437,          // Joko's Domain
+            398,          // Basalt Grotto
+            446,          // The Alkali Pan
+            441,          // The Shattered Ravines
+            442,          // Lair of the Forgotten
+            443,          // Poisoned Outcrops
+            439,          // The Ruptured Heart
+            480, 525,     // Ruins of Morah
+            438,          // Bone Palace
+        ],
+        exclude_explorables: &[],
+    },
+    RunCategory {
+        name: "Vabbi",
+        zones: &[
+            398,          // Basalt Grotto
+            397,          // Vehjin Mines
+            476, 522,     // Jennur's Horde
+            399,          // Forum Highlands
+            428, 518,     // Tihark Orchard
+            414,          // The Kodash Bazaar
+            419,          // The Mirror of Lyss
+            396,          // Mihanu Township
+            435, 521,     // Grand Court of Sebelkeh
+            434,          // Dasha Vestibule
+            433, 519,     // Dzagonur Bastion
+            403,          // Honur Hill
+            402,          // Resplendent Makuun
+            407,          // Yahnur Market
+            406,          // Vehtendi Valley
+            392,          // Yatendi Canyons
+            393,          // Chantry of Secrets
+            378,          // Wehhan Terraces
+            427,          // Moddok Crevice
+        ],
+        exclude_explorables: &[],
+    },
+    RunCategory {
+        name: "Eye of the North",
+        zones: &[
+            675,          // Boreal Station
+            499, 793,     // Ice Cliff Chasms
+            642, 821,     // Eye of the North
+            548,          // Norrhart Domains
+            644,          // Gunnar's Hold
+            482,          // Bjora Marches
+            650,          // Longeye's Ledge
+            649,          // Grothmar Wardowns
+            647,          // Dalada Uplands
+            648,          // Doomlore Shrine
+            513,          // Drakkar Lake
+            643,          // Sifhalla
+            553, 708,     // Varajar Fells
+            645, 854,     // Olafstead
+            566,          // Verdant Cascades
+            639,          // Umbral Grotto
+            604, 605, 606,// Vloxen Excavations
+            624,          // Vlox's Falls
+            485,          // Arbor Bay
+            581, 582, 583,// Shards of Orr
+            638,          // Gadd's Encampment
+            572,          // Alcazia Tangle
+            640,          // Rata Sum
+            501,          // Riven Earth
+            641,          // Tarnished Haven
+            569,          // Magus Stones
         ],
         exclude_explorables: &[],
     },
@@ -411,13 +410,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_all_13_categories_present() {
-        assert_eq!(ALL_CATEGORIES.len(), 13);
+    fn test_all_15_categories_present() {
+        assert_eq!(ALL_CATEGORIES.len(), 15);
     }
 
     #[test]
-    fn test_droks_run_matching_and_summarize() {
-        let droks_cat = ALL_CATEGORIES.iter().find(|c| c.name == "Droks Run").unwrap();
+    fn test_southern_shiverpeaks_matching_and_summarize() {
+        let shiverpeaks = ALL_CATEGORIES.iter().find(|c| c.name == "Southern Shiverpeaks").unwrap();
 
         // Map IDs: Beacon's Perch (133), Lornar's Pass (90), Dreadnought's Drift (97)
         let rec1 = RouteRecord {
@@ -438,7 +437,7 @@ mod tests {
             avg: Duration::from_secs(60),
         };
 
-        let summary = droks_cat.summarize(&[rec1, rec_unrelated]);
+        let summary = shiverpeaks.summarize(&[rec1, rec_unrelated]);
         assert_eq!(summary.records.len(), 1);
         assert_eq!(summary.zone_count, 1);
         assert_eq!(summary.total_pb, Duration::from_secs(120));
@@ -447,24 +446,28 @@ mod tests {
 
     #[test]
     fn test_exclusions() {
-        let shiverpeaks = ALL_CATEGORIES.iter().find(|c| c.name == "Shiverpeaks Tour").unwrap();
-        // Icedome (87) -> Frozen Forest (98) -> Iron Mines (24): SHOULD MATCH
-        assert!(shiverpeaks.matches(87, 98, 24));
-        // Iron Mines (24) -> Iron Mines (24) -> Droknar's Forge (20): EXCLUDED MISSION
-        assert!(!shiverpeaks.matches(24, 24, 20));
+        let shiverpeaks = ALL_CATEGORIES.iter().find(|c| c.name == "Southern Shiverpeaks").unwrap();
+        // Icedome (87) -> Frozen Forest (98) -> Droknar's Forge (20): SHOULD MATCH
+        assert!(shiverpeaks.matches(87, 98, 20));
+        // Iron Mines (24) as run_map_id: EXCLUDED
+        assert!(!shiverpeaks.matches(87, 24, 20));
 
-        let desert = ALL_CATEGORIES.iter().find(|c| c.name == "Desert Tour").unwrap();
-        // Destiny's Gorge (154) -> Skyward Reach (115) -> Elona Reach (118): SHOULD MATCH
-        assert!(desert.matches(154, 115, 118));
-        // Elona Reach mission (Through 118): EXCLUDED
-        assert!(!desert.matches(118, 118, 154));
+        let desert = ALL_CATEGORIES.iter().find(|c| c.name == "Crystal Desert").unwrap();
+        // Destiny's Gorge (154) -> Skyward Reach (115) -> Augury Rock (119): SHOULD MATCH
+        assert!(desert.matches(154, 115, 119));
+        // Elona Reach (118) as run_map_id: EXCLUDED
+        assert!(!desert.matches(154, 118, 119));
 
-        let factions = ALL_CATEGORIES.iter().find(|c| c.name == "Factions Rush").unwrap();
-        // Sunjiang District (220) as explorable run_map: EXCLUDED
-        assert!(!factions.matches(218, 220, 222));
+        let cantha = ALL_CATEGORIES.iter().find(|c| c.name == "Cantha").unwrap();
+        // Sunjiang District (220) as run_map_id: EXCLUDED
+        assert!(!cantha.matches(194, 220, 217));
 
-        let eotn = ALL_CATEGORIES.iter().find(|c| c.name == "Eye of the North Tour").unwrap();
+        let eotn = ALL_CATEGORIES.iter().find(|c| c.name == "Eye of the North").unwrap();
         // Umbral Grotto (639) -> Vloxen Excavations (604) -> Vlox's Falls (624): SHOULD MATCH
         assert!(eotn.matches(639, 604, 624));
+
+        let deso = ALL_CATEGORIES.iter().find(|c| c.name == "Desolation").unwrap();
+        // Basalt Grotto (398) -> The Alkali Pan (446) -> Lair of the Forgotten (442): SHOULD MATCH
+        assert!(deso.matches(398, 446, 442));
     }
 }
