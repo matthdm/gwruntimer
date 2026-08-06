@@ -629,7 +629,7 @@ impl ImguiRenderLoop for ZoneTimer {
             ui.window("Session Log##session_log")
                 //.opened(&mut show_log)
                 .size_constraints([640.0, 400.0], [f32::MAX, f32::MAX])
-                .flags(if edit { WindowFlags::empty() } else { overlay_flags })
+                .flags(if edit { WindowFlags::NO_COLLAPSE } else { overlay_flags })
                 .build(|| {
                     self.render_session_table(ui);
                 });
