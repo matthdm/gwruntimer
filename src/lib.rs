@@ -677,6 +677,12 @@ impl ImguiRenderLoop for ZoneTimer {
                     if ui.menu_item_config("Show Instance Time").selected(self.show_inst_timer).build() {
                         self.show_inst_timer = !self.show_inst_timer;
                     }
+
+                    if let PinnedTarget::Route(_) = self.pinned_target {
+                        if ui.menu_item_config("Remove Pinned PB Record").build() {
+                            self.pinned_target = PinnedTarget::None;
+                        }
+                    }
                     
                     ui.separator();
 
