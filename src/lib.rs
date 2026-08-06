@@ -779,7 +779,13 @@ impl ImguiRenderLoop for ZoneTimer {
 
     fn message_filter(&self, io: &imgui::Io) -> hudhook::MessageFilter {
         let quick_edit_keys_down = io.key_ctrl && io.key_shift;
-        if quick_edit_keys_down || self.in_full_edit_mode { 
+        if quick_edit_keys_down { 
+            let mut filter = hudhook::MessageFilter::empty();
+            if io.want_capture_keyboard { filter |= hudhook::MessageFilter::InputKeyboard; }
+            if io.want_capture_mouse { filter |= hudhook::MessageFilter::InputMouse; }
+            filter
+        }
+        else if self.in_full_edit_mode {
             hudhook::MessageFilter::InputAll | hudhook::MessageFilter::WindowAll
         }
         else {
