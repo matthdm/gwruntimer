@@ -115,6 +115,43 @@ pub party     : *const PartyContext,
  }
 
 
+/// Copies `buf.len()` bytes from `addr` in our own process. Returns false instead of faulting when
+/// the address isn't readable, so probing memory we aren't sure about can never crash the game.
+#[cfg(all(windows, target_arch = "x86"))]
+pub fn read_into(addr: usize, buf: &mut [u8]) -> bool {
+    use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    let mut read = 0usize;
+    unsafe {
+        ReadProcessMemory(GetCurrentProcess(), addr as *const core::ffi::c_void, buf.as_mut_ptr().cast(), buf.len(), Some(&mut read)).is_ok()
+            && read == buf.len()
+    }
+}
+
+/// Non-game builds (unit tests on a 64-bit host): nothing is readable.
+#[cfg(not(all(windows, target_arch = "x86")))]
+pub fn read_into(_addr: usize, _buf: &mut [u8]) -> bool {
+    false
+}
+
+pub fn read_u32(addr: usize) -> Option<u32> {
+    let mut b = [0u8; 4];
+    read_into(addr, &mut b).then(|| u32::from_le_bytes(b))
+}
+
+pub fn read_f32(addr: usize) -> Option<f32> {
+    read_u32(addr).map(f32::from_bits)
+}
+
+/// Address of the game's agent context (holds the per-agent movement array), if there is one.
+pub fn agent_context_addr() -> Option<usize> {
+    unsafe {
+        let pctx = get_context_tls().as_ref()?;
+        let p = pctx.agent as usize;
+        (p != 0).then_some(p)
+    }
+}
+
 pub fn get_instance_uptime() -> Option<& 'static u32> {
     unsafe {
         let pctx = get_context_tls().as_ref()?;

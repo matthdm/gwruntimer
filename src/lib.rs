@@ -3,6 +3,8 @@ mod gw;
 mod run_log;
 mod map_names;
 mod categories;
+mod position;
+mod uplink;
 
 pub mod version {
     include!(concat!(env!("OUT_DIR"), "/version.rs"));
@@ -99,6 +101,15 @@ struct ZoneTimer {
     show_inst_timer: bool,
 
     state: ZoneTimerState,
+
+    /// TIPS live tracking (see uplink.rs). Created in `initialize`.
+    uplink: Option<uplink::Uplink>,
+    show_tips: bool,
+    /// Text box contents for the tracker token.
+    tips_token_input: String,
+    probe: position::Probe,
+    last_pos_read: Option<Instant>,
+    last_reading: Option<position::Reading>,
 }
 
 impl Default for ZoneTimer {
@@ -124,6 +135,12 @@ impl Default for ZoneTimer {
             show_inst_timer: false,
             was_edit: false,
             in_full_edit_mode: false,
+            uplink: None,
+            show_tips: false,
+            tips_token_input: String::new(),
+            probe: position::Probe::default(),
+            last_pos_read: None,
+            last_reading: None,
             state: ZoneTimerState {
                 last_load_state: false,
                 mapid_before_run: 0,
@@ -208,6 +225,120 @@ impl ZoneTimer {
                     .any(|cat| cat.matches(rec.from_map_id, rec.run_map_id, rec.to_map_id))
             })
             .collect();
+    }
+
+    /// Reads the character's position about four times a second, while the panel is open or sharing is on,
+    /// and hands it to the uplink. Reading is best-effort and can never fault (see position.rs).
+    fn sample_position(&mut self) {
+        let Some(up) = &self.uplink else { return };
+        if !(self.show_tips || up.sharing()) {
+            return;
+        }
+        if self.last_pos_read.is_some_and(|t| t.elapsed() < Duration::from_millis(250)) {
+            return;
+        }
+        self.last_pos_read = Some(Instant::now());
+        let Some(agent_id) = gw::CharControlledCharacterData::current().map(|c| c.agent_id) else { return };
+        let reading = self.probe.read(agent_id, gw::agent_context_addr());
+        let source = position::Source::from_index(up.config().position_source);
+        up.set_position(reading.pick(source));
+        self.last_reading = Some(reading);
+    }
+
+    /// The TIPS Tracker panel: token, next run, Start/End, and the position-sharing switch.
+    fn render_tips(&mut self, ui: &imgui::Ui, edit: bool) {
+        let Some(up) = &self.uplink else {
+            ui.text("The tracker isn't available.");
+            return;
+        };
+        if !edit {
+            ui.text_disabled("Hold Ctrl+Shift to type and click.");
+        }
+        let status = up.status();
+        let cfg = up.config();
+
+        ui.text("Tracker token (from My shop on the TIPS site)");
+        ui.set_next_item_width(320.0);
+        ui.input_text("##tips_token", &mut self.tips_token_input).password(true).build();
+        ui.same_line();
+        if ui.button("Save##tips_token") {
+            let token = self.tips_token_input.clone();
+            up.update_config(|c| c.token = token);
+            up.refresh();
+        }
+
+        ui.separator();
+        if let Some(run) = &status.next_run {
+            ui.text(format!("Next run: {} ({})", run.title, run.status));
+            if let Some(route) = &run.route_name {
+                ui.text(format!("Route: {route}"));
+            }
+        } else {
+            ui.text("No run found yet.");
+        }
+        if ui.button("Refresh##tips") {
+            up.refresh();
+        }
+        ui.same_line();
+        if status.active_run.is_some() {
+            if ui.button("End run##tips") {
+                up.end_run();
+            }
+        } else if ui.button("Start run##tips") {
+            up.start_run();
+        }
+        if status.busy {
+            ui.same_line();
+            ui.text_disabled("working...");
+        }
+        if status.active_run.is_some() {
+            ui.text_colored([0.2, 0.9, 0.35, 1.0], "Tracking: sending your map to TIPS.");
+            if let Some(p) = status.progress {
+                imgui::ProgressBar::new(p as f32 / 100.0).size([320.0, 0.0]).overlay_text(format!("{p}%")).build(ui);
+            }
+            if status.off_route {
+                ui.text_colored([1.0, 0.75, 0.2, 1.0], "Off route");
+            }
+        }
+        if !status.message.is_empty() {
+            ui.text_wrapped(&status.message);
+        }
+
+        ui.separator();
+        let mut share = cfg.share_position;
+        if ui.checkbox("Share my position on the map (x/y)", &mut share) {
+            up.update_config(|c| c.share_position = share);
+        }
+        ui.text_disabled("Off by default. When on, your x/y inside the map is sent so the site can place you on it.");
+        let labels: Vec<&str> = position::Source::ALL.iter().map(|s| s.label()).collect();
+        let mut idx = cfg.position_source.min(labels.len() - 1);
+        ui.set_next_item_width(320.0);
+        if ui.combo_simple_string("Position source", &mut idx, &labels) {
+            up.update_config(|c| c.position_source = idx);
+        }
+
+        if ui.collapsing_header("Position debug (check these move when you walk)", TreeNodeFlags::empty()) {
+            match &self.last_reading {
+                None => ui.text("No reading yet. Enter an explorable area or town."),
+                Some(r) => {
+                    ui.text(format!("Agent id: {}   agent array found: {}", r.agent_id, r.array_found));
+                    let show = |ui: &imgui::Ui, name: &str, p: &Option<position::Pos>| match p {
+                        Some(p) => ui.text(format!("{name}: x {:.1}  y {:.1}  z {:.1}", p.x, p.y, p.z)),
+                        None => ui.text(format!("{name}: not readable")),
+                    };
+                    show(ui, "Agent position", &r.agent);
+                    if let Some(plane) = r.plane {
+                        ui.text(format!("Plane: {plane}"));
+                    }
+                    show(ui, "Movement A (+0x64)", &r.movement_a);
+                    show(ui, "Movement B (+0x74)", &r.movement_b);
+                }
+            }
+        }
+
+        ui.separator();
+        ui.text_disabled("Sent to TIPS only while a run is active: map ID, town or explorable,");
+        ui.text_disabled("a random session ID, and x/y if sharing is on. Never your name or account.");
     }
 
     /// Draw the table of personal records and route statistics, grouped by
@@ -568,6 +699,12 @@ impl ImguiRenderLoop for ZoneTimer {
             }
             Err(e) => tracing::error!("failed to open run log: {e}"),
         }
+
+        // TIPS tracker: does nothing until a token is entered and Start run is pressed.
+        let cfg_path = hudhook::util::get_dll_path().map(|p| p.parent().unwrap().join("tips_tracker.cfg"));
+        let uplink = uplink::Uplink::new(cfg_path);
+        self.tips_token_input = uplink.config().token;
+        self.uplink = Some(uplink);
     }
 
     fn render(&mut self, ui: &mut imgui::Ui) {
@@ -578,6 +715,9 @@ impl ImguiRenderLoop for ZoneTimer {
                     self.state.mapid_before_run = self.state.mapid_during_run;
                     self.state.mapid_during_run = self.state.mapid_now;
                     self.state.mapid_now = cur_map_id;
+                    if let Some(up) = &self.uplink {
+                        up.push_zone(cur_map_id, map_data.is_explorable != 0);
+                    }
                     if !self.elapsed().is_zero() {
                         self.record_run(
                             self.state.mapid_before_run,
@@ -603,6 +743,9 @@ impl ImguiRenderLoop for ZoneTimer {
                 }
             }
             self.state.last_load_state = map_data.is_loaded();
+            if map_data.is_loaded() {
+                self.sample_position();
+            }
         }
 
         // The edit chord unlocks dragging and the context menu.
@@ -692,6 +835,9 @@ impl ImguiRenderLoop for ZoneTimer {
                     if ui.menu_item_config("Personal Records").selected(self.show_records).build() {
                         self.show_records = !self.show_records;
                     }
+                    if ui.menu_item_config("TIPS Tracker").selected(self.show_tips).build() {
+                        self.show_tips = !self.show_tips;
+                    }
 
                     ui.separator();
 
@@ -740,6 +886,16 @@ impl ImguiRenderLoop for ZoneTimer {
                     self.render_records_table(ui, edit);
                 });
             self.show_records = opened;
+        }
+
+        // TIPS live-tracking panel, opened via the right-click menu.
+        if self.show_tips {
+            ui.window("TIPS Tracker##tips_window")
+                .size([470.0, 430.0], Condition::FirstUseEver)
+                .flags(if edit { WindowFlags::empty() } else { overlay_flags })
+                .build(|| {
+                    self.render_tips(ui, edit);
+                });
         }
 
         if std::mem::take(&mut self.confirm_delete_route) {

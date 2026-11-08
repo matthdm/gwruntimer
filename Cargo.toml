@@ -53,5 +53,8 @@ windows-sys = {
     "Win32_System_LibraryLoader",
     "Win32_Security"] 
 }
+# TIPS live tracking (src/uplink.rs): a small blocking HTTPS client and JSON for the few fields we send and read.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+serde_json = "1"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.22"
