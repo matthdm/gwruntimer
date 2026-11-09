@@ -38,6 +38,33 @@ const MAX_ZONE_RETRIES: u32 = 3;
 
 // ---------- settings ----------
 
+/// What the tracker does when the runner presses Start: follow a run for customers, or just show where they are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TrackingMode {
+    /// Runner tracking: tied to a run (Start run / End run).
+    #[default]
+    Run,
+    /// General tracking: the same dot and zone trail with no run behind it (Start tracking / Stop tracking).
+    General,
+}
+
+impl TrackingMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TrackingMode::Run => "run",
+            TrackingMode::General => "general",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<TrackingMode> {
+        match s {
+            "run" => Some(TrackingMode::Run),
+            "general" => Some(TrackingMode::General),
+            _ => None,
+        }
+    }
+}
+
 /// Saved next to the DLL as `tips_tracker.cfg`. The token is like a password: it can post as this runner.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
@@ -46,11 +73,18 @@ pub struct Config {
     pub share_position: bool,
     /// Index into `position::Source::ALL`.
     pub position_source: usize,
+    /// Runner tracking (a run) or general tracking (no run). Fixed while tracking.
+    pub tracking_mode: TrackingMode,
 }
 
 impl Default for Config {
     fn default() -> Config {
-        Config { token: String::new(), share_position: false, position_source: crate::position::Source::MovementA.to_index() }
+        Config {
+            token: String::new(),
+            share_position: false,
+            position_source: crate::position::Source::MovementA.to_index(),
+            tracking_mode: TrackingMode::Run,
+        }
     }
 }
 
@@ -72,6 +106,11 @@ impl Config {
                         }
                     }
                 }
+                "tracking_mode" => {
+                    if let Some(m) = TrackingMode::from_str(v) {
+                        c.tracking_mode = m;
+                    }
+                }
                 _ => {}
             }
         }
@@ -79,7 +118,13 @@ impl Config {
     }
 
     pub fn serialize(&self) -> String {
-        format!("token={}\nshare_position={}\nposition_source={}\n", self.token, u8::from(self.share_position), self.position_source)
+        format!(
+            "token={}\nshare_position={}\nposition_source={}\ntracking_mode={}\n",
+            self.token,
+            u8::from(self.share_position),
+            self.position_source,
+            self.tracking_mode.as_str()
+        )
     }
 }
 
@@ -98,6 +143,8 @@ pub struct Status {
     pub next_run: Option<NextRun>,
     /// The run this tracker is reporting on (between Start run and End run).
     pub active_run: Option<String>,
+    /// General tracking (no run) is on.
+    pub active_general: bool,
     pub progress: Option<i64>,
     pub off_route: bool,
     pub message: String,
@@ -182,6 +229,8 @@ enum Cmd {
     Start,
     End,
     Zone,
+    StartGeneral,
+    EndGeneral,
 }
 
 pub struct Uplink {
@@ -225,7 +274,9 @@ impl Uplink {
 
     /// Whether position sharing is on (cheap enough to call every frame).
     pub fn sharing(&self) -> bool {
-        self.shared.config.lock().unwrap().share_position
+        // General tracking is public position by definition: starting it is the consent.
+        let general = self.shared.status.lock().unwrap().active_general;
+        general || self.shared.config.lock().unwrap().share_position
     }
 
     pub fn status(&self) -> Status {
@@ -234,8 +285,16 @@ impl Uplink {
 
     /// Updates and saves the settings.
     pub fn update_config(&self, f: impl FnOnce(&mut Config)) {
+        let tracking = {
+            let s = self.shared.status.lock().unwrap();
+            s.active_run.is_some() || s.active_general
+        };
         let mut c = self.shared.config.lock().unwrap();
+        let mode = c.tracking_mode;
         f(&mut c);
+        if tracking {
+            c.tracking_mode = mode; // the mode cannot change while tracking
+        }
         c.token = c.token.trim().chars().take(MAX_TOKEN).collect();
         if let Some(path) = &self.shared.config_path {
             if let Err(e) = std::fs::write(path, c.serialize()) {
@@ -301,6 +360,13 @@ impl Uplink {
     }
     pub fn end_run(&self) {
         self.send(Cmd::End);
+    }
+    /// General tracking: start broadcasting position and the zone trail with no run (the Start tracking button).
+    pub fn start_general(&self) {
+        self.send(Cmd::StartGeneral);
+    }
+    pub fn end_general(&self) {
+        self.send(Cmd::EndGeneral);
     }
 }
 
@@ -410,11 +476,13 @@ struct Worker {
     zone_retries: u32,
     /// Whether sharing was on at the last beat, to notice the moment it is switched off.
     was_sharing: bool,
+    /// General tracking (no run) is on: requests go to the presence endpoints.
+    general: bool,
 }
 
 impl Worker {
     fn new(base: &str, allow_http: bool, timing: Timing, shared: Arc<Shared>) -> Worker {
-        Worker { api: Api::new(base, allow_http), timing, shared, session: new_session_id(), active: None, last_beat: Instant::now(), bounds_sent: false, retry_gen: 0, zone_retries: 0, was_sharing: false }
+        Worker { api: Api::new(base, allow_http), timing, shared, session: new_session_id(), active: None, last_beat: Instant::now(), bounds_sent: false, retry_gen: 0, zone_retries: 0, was_sharing: false, general: false }
     }
 
     fn run(mut self, rx: Receiver<Cmd>) {
@@ -433,6 +501,8 @@ impl Worker {
         // The game or the tracker is closing: best-effort tidy end of any run we started.
         if self.active.is_some() {
             self.end_run();
+        } else if self.general {
+            self.end_general();
         }
     }
 
@@ -450,7 +520,16 @@ impl Worker {
     }
 
     fn sharing(&self) -> bool {
-        self.shared.config.lock().unwrap().share_position
+        self.general || self.shared.config.lock().unwrap().share_position
+    }
+
+    /// The path every zone, heartbeat and end goes under: the presence endpoints in general tracking, else the run's.
+    fn track_base(&self) -> Option<String> {
+        if self.general {
+            Some("/api/tracker/presence".to_string())
+        } else {
+            self.active.as_ref().map(|id| format!("/api/tracker/runs/{id}"))
+        }
     }
 
     /// The fresh position to send, but only when the runner has switched sharing on.
@@ -509,8 +588,9 @@ impl Worker {
         match e {
             ApiError::Http(401, _) => self.say("TIPS rejected the token. Make a new one on your shop page."),
             ApiError::Http(409, m) => {
-                self.say(format!("{m}. The run is over."));
+                let msg = if self.general { format!("{m}. Tracking stopped.") } else { format!("{m}. The run is over.") };
                 self.stop_run();
+                self.say(msg);
             }
             ApiError::Http(404, _) => {
                 self.say("That run isn't yours any more. Refresh.");
@@ -522,8 +602,10 @@ impl Worker {
 
     fn stop_run(&mut self) {
         self.active = None;
+        self.general = false;
         let mut s = self.shared.status.lock().unwrap();
         s.active_run = None;
+        s.active_general = false;
         s.progress = None;
         s.off_route = false;
     }
@@ -534,6 +616,8 @@ impl Worker {
             Cmd::Start => self.start_run(),
             Cmd::End => self.end_run(),
             Cmd::Zone => self.zone(),
+            Cmd::StartGeneral => self.start_general(),
+            Cmd::EndGeneral => self.end_general(),
         }
     }
 
@@ -560,7 +644,51 @@ impl Worker {
         }
     }
 
+    /// Starts general tracking: the same dot and zone trail with no run. Always succeeds server-side; a relaunched game
+    /// takes over from its older session.
+    fn start_general(&mut self) {
+        if self.general {
+            return;
+        }
+        if self.active.is_some() {
+            self.say("End your run before starting general tracking.");
+            return;
+        }
+        let body = json!({ "client_session": self.session });
+        match self.call(3, |api, t| api.post("/api/tracker/presence/start", t, &body)) {
+            Ok(_) => {
+                self.general = true;
+                self.last_beat = Instant::now();
+                self.shared.latest.lock().unwrap().clear_samples();
+                {
+                    let mut s = self.shared.status.lock().unwrap();
+                    s.active_general = true;
+                    s.message = "Tracking.".into();
+                }
+                self.zone(); // report the map we're standing in right now
+            }
+            Err(e) => self.failed(&e),
+        }
+    }
+
+    fn end_general(&mut self) {
+        if !self.general {
+            return;
+        }
+        let body = json!({ "client_session": self.session });
+        let result = self.call(2, |api, t| api.post("/api/tracker/presence/end", t, &body));
+        self.stop_run();
+        match result {
+            Ok(_) => self.say("Tracking stopped."),
+            Err(e) => self.failed(&e),
+        }
+    }
+
     fn start_run(&mut self) {
+        if self.general {
+            self.say("Stop general tracking before starting a run.");
+            return;
+        }
         let Some(run) = self.shared.status.lock().unwrap().next_run.clone() else {
             self.say("Press Refresh to find your next run first.");
             return;
@@ -603,7 +731,7 @@ impl Worker {
     }
 
     fn zone(&mut self) {
-        let Some(id) = self.active.clone() else { return };
+        let Some(base) = self.track_base() else { return };
         let (map_id, explorable, bounds) = {
             let l = self.shared.latest.lock().unwrap();
             match l.map_id {
@@ -617,15 +745,15 @@ impl Worker {
         if let (true, Some(b)) = (with_bounds, bounds) {
             body["bounds"] = json!(b);
         }
-        let path = format!("/api/tracker/runs/{id}/zone");
+        let path = format!("{base}/zone");
         self.bounds_sent = false; // until the server says it has them
         match self.call(4, |api, t| api.post(&path, t, &body)) {
             Ok(v) => {
                 self.last_beat = Instant::now();
                 self.bounds_sent = with_bounds;
                 if v.get("ignored").and_then(Value::as_bool) == Some(true) {
-                    self.say("Another game client took over this run.");
                     self.stop_run();
+                    self.say("Another game client took over this run.");
                     return;
                 }
                 let finished = v.get("finished").and_then(Value::as_bool) == Some(true);
@@ -645,7 +773,7 @@ impl Worker {
 
     /// Heartbeats while a run is active: every 30 s, or every 5 s while a position is being shared.
     fn tick(&mut self) {
-        let Some(id) = self.active.clone() else { return };
+        let Some(base) = self.track_base() else { return };
         let every = if self.position_to_send().is_some() { self.timing.position_beat } else { self.timing.heartbeat };
         let sharing = self.sharing();
         // Sharing just went off: don't wait for the next beat to clear the dot and trail on the site.
@@ -677,11 +805,11 @@ impl Worker {
         if !samples.is_empty() {
             body["points"] = json!(samples.iter().map(|(x, y)| json!([x, y])).collect::<Vec<_>>());
         }
-        let path = format!("/api/tracker/runs/{id}/heartbeat");
+        let path = format!("{base}/heartbeat");
         match self.call(1, |api, t| api.post(&path, t, &body)) {
             Ok(v) if v.get("ignored").and_then(Value::as_bool) == Some(true) => {
-                self.say("Another game client took over this run.");
                 self.stop_run();
+                self.say("Another game client took over this run.");
             }
             Ok(_) => {}
             Err(e) => {
@@ -713,11 +841,22 @@ mod tests {
 
     /// A tiny HTTP server that records requests and answers like the TIPS API.
     fn mock_server(finish_on_map: Option<u64>) -> (String, Arc<Mutex<Vec<Req>>>) {
-        mock_server_with(finish_on_map, false)
+        mock_server_with(finish_on_map, Quirk::None)
     }
 
-    /// `refuse_bounds`: answer 400 to any zone request that carries `bounds`.
-    fn mock_server_with(finish_on_map: Option<u64>, refuse_bounds: bool) -> (String, Arc<Mutex<Vec<Req>>>) {
+    /// Ways the mock server misbehaves on purpose.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Quirk {
+        None,
+        /// 400 to any zone request that carries `bounds`.
+        RefuseBounds,
+        /// 409 to presence zone and heartbeat requests (general tracking is not on, server side).
+        PresenceConflict,
+        /// `ignored: true` to presence heartbeats (another game client took over).
+        PresenceIgnored,
+    }
+
+    fn mock_server_with(finish_on_map: Option<u64>, quirk: Quirk) -> (String, Arc<Mutex<Vec<Req>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         let log: Arc<Mutex<Vec<Req>>> = Arc::default();
@@ -759,7 +898,11 @@ mod tests {
                         ("401 Unauthorized", json!({ "error": "Invalid tracker token" }))
                     } else if path.ends_with("/next-run") {
                         ("200 OK", json!({ "run": { "id": "run1", "title": "Beacon's to Drok's", "status": "scheduled", "start_utc": null, "route_name": "Test route" } }))
-                    } else if path.ends_with("/zone") && refuse_bounds && body.get("bounds").is_some() {
+                    } else if quirk == Quirk::PresenceConflict && (path == "/api/tracker/presence/zone" || path == "/api/tracker/presence/heartbeat") {
+                        ("409 Conflict", json!({ "error": "General tracking is not on" }))
+                    } else if quirk == Quirk::PresenceIgnored && path == "/api/tracker/presence/heartbeat" {
+                        ("200 OK", json!({ "ok": true, "ignored": true }))
+                    } else if path.ends_with("/zone") && quirk == Quirk::RefuseBounds && body.get("bounds").is_some() {
                         ("400 Bad Request", json!({ "error": "bounds are not acceptable" }))
                     } else if path.ends_with("/zone") {
                         let finished = Some(body["map_id"].as_u64().unwrap_or(0)) == finish_on_map;
@@ -810,10 +953,10 @@ mod tests {
 
     #[test]
     fn config_round_trips_and_ignores_junk() {
-        let c = Config { token: "tips_trk_abc".into(), share_position: true, position_source: 2 };
+        let c = Config { token: "tips_trk_abc".into(), share_position: true, position_source: 2, tracking_mode: TrackingMode::General };
         assert_eq!(Config::parse(&c.serialize()), c);
         let junk = Config::parse("nonsense\ntoken=short\n=\nshare_position=maybe\nposition_source=x\nunknown=1\n");
-        assert_eq!(junk, Config { token: "short".into(), share_position: false, position_source: crate::position::Source::MovementA.to_index() });
+        assert_eq!(junk, Config { token: "short".into(), share_position: false, position_source: crate::position::Source::MovementA.to_index(), tracking_mode: TrackingMode::Run });
         assert_eq!(Config::parse(&format!("token={}\n", "a".repeat(500))).token, "");
         assert!(!Config::default().share_position, "position sharing must be off by default");
         assert_eq!(Config::default().position_source, crate::position::Source::MovementA.to_index(), "the movement vector is the default source");
@@ -996,7 +1139,7 @@ mod tests {
 
     #[test]
     fn a_zone_the_server_refuses_does_not_stop_the_heartbeats() {
-        let (base, log) = mock_server_with(None, true);
+        let (base, log) = mock_server_with(None, Quirk::RefuseBounds);
         let timing = Timing { heartbeat: Duration::from_millis(100), position_beat: Duration::from_millis(100), retry_base: Duration::from_millis(5), sample: Duration::from_millis(20) };
         let up = Uplink::with_base(&base, true, None, timing);
         up.update_config(|c| {
@@ -1150,6 +1293,149 @@ mod tests {
         thread::sleep(Duration::from_millis(700));
         assert!(requests(&log, "/end").is_empty(), "the run was ended by a re-initialize: {:?}", requests(&log, "/end"));
         assert!(slot.as_ref().unwrap().status().active_run.is_some());
+    }
+
+    fn general_up(quirk: Quirk) -> (Uplink, Arc<Mutex<Vec<Req>>>) {
+        let (base, log) = mock_server_with(None, quirk);
+        let timing = Timing { heartbeat: Duration::from_millis(600), position_beat: Duration::from_millis(600), retry_base: Duration::from_millis(5), sample: Duration::from_millis(20) };
+        let up = Uplink::with_base(&base, true, None, timing);
+        up.update_config(|c| {
+            c.token = "tips_trk_test".into();
+            c.tracking_mode = TrackingMode::General;
+        });
+        (up, log)
+    }
+
+    fn at(log: &Arc<Mutex<Vec<Req>>>, path: &str) -> Vec<Req> {
+        log.lock().unwrap().iter().filter(|r| r.path == path).cloned().collect()
+    }
+
+    #[test]
+    fn the_tracking_mode_is_saved_and_defaults_to_runner_tracking() {
+        assert_eq!(Config::default().tracking_mode, TrackingMode::Run);
+        assert_eq!(Config::parse("tracking_mode=general\n").tracking_mode, TrackingMode::General);
+        assert_eq!(Config::parse("tracking_mode=run\n").tracking_mode, TrackingMode::Run);
+        assert_eq!(Config::parse("tracking_mode=weird\n").tracking_mode, TrackingMode::Run);
+        assert!(Config::default().serialize().contains("tracking_mode=run"));
+        assert_eq!(TrackingMode::from_str("general"), Some(TrackingMode::General));
+        assert_eq!(TrackingMode::General.as_str(), "general");
+    }
+
+    #[test]
+    fn nothing_is_sent_in_general_mode_until_start_tracking() {
+        let (up, log) = general_up(Quirk::None);
+        up.push_zone(90, true, Some([-1.0, -2.0, 3.0, 4.0]));
+        up.set_position(Some(Pos { x: 1.0, y: 2.0, z: 0.0 }));
+        thread::sleep(Duration::from_millis(800));
+        assert!(log.lock().unwrap().is_empty(), "sent {:?}", log.lock().unwrap());
+        assert!(!up.status().active_general);
+    }
+
+    #[test]
+    fn start_tracking_reports_the_zone_with_position_and_bounds_without_the_share_tick() {
+        let (up, log) = general_up(Quirk::None);
+        assert!(!up.config().share_position, "the share tick is not needed in general mode");
+        up.push_zone(90, true, Some([-1.0, -2.0, 3.0, 4.0]));
+        up.set_position(Some(Pos { x: 7.0, y: 8.0, z: 0.0 }));
+        up.start_general();
+        wait("general tracking on", || up.status().active_general);
+        wait("the presence zone", || !at(&log, "/api/tracker/presence/zone").is_empty());
+        assert_eq!(at(&log, "/api/tracker/presence/start").len(), 1);
+        let z = &at(&log, "/api/tracker/presence/zone")[0];
+        assert_eq!(z.body["map_id"], 90);
+        assert_eq!(z.body["x"], 7.0);
+        assert_eq!(z.body["bounds"], json!([-1.0, -2.0, 3.0, 4.0]));
+        assert!(requests(&log, "/next-run").is_empty() && log.lock().unwrap().iter().all(|r| !r.path.contains("/runs/")), "general tracking never touches a run");
+    }
+
+    #[test]
+    fn general_heartbeats_carry_the_samples_to_the_presence_endpoint() {
+        let (up, log) = general_up(Quirk::None);
+        up.push_zone(90, true, None);
+        up.start_general();
+        wait("general tracking on", || up.status().active_general);
+        for i in 1..=3 {
+            sample(&up, i as f32, i as f32);
+        }
+        wait("a presence heartbeat with points", || at(&log, "/api/tracker/presence/heartbeat").iter().any(|r| !points_of(r).is_empty()));
+        let beat = at(&log, "/api/tracker/presence/heartbeat").into_iter().find(|r| !points_of(r).is_empty()).unwrap();
+        assert_eq!(points_of(&beat), vec![(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)]);
+        assert_eq!((beat.body["x"].as_f64(), beat.body["y"].as_f64()), (Some(3.0), Some(3.0)));
+    }
+
+    #[test]
+    fn stop_tracking_ends_it_and_stops_everything() {
+        let (up, log) = general_up(Quirk::None);
+        up.push_zone(90, true, None);
+        up.start_general();
+        wait("general tracking on", || up.status().active_general);
+        sample(&up, 1.0, 1.0);
+        up.end_general();
+        wait("the end request", || !at(&log, "/api/tracker/presence/end").is_empty());
+        wait("tracking off", || !up.status().active_general);
+        let before = log.lock().unwrap().len();
+        sample(&up, 2.0, 2.0); // sharing is off again: this is not sent or kept
+        thread::sleep(Duration::from_millis(900));
+        assert_eq!(log.lock().unwrap().len(), before, "requests after Stop tracking: {:?}", log.lock().unwrap());
+        assert!(!up.sharing());
+    }
+
+    #[test]
+    fn the_mode_cannot_be_changed_while_tracking() {
+        let (up, _log) = general_up(Quirk::None);
+        up.push_zone(90, true, None);
+        up.start_general();
+        wait("general tracking on", || up.status().active_general);
+        up.update_config(|c| c.tracking_mode = TrackingMode::Run);
+        assert_eq!(up.config().tracking_mode, TrackingMode::General);
+        up.end_general();
+        wait("tracking off", || !up.status().active_general);
+        up.update_config(|c| c.tracking_mode = TrackingMode::Run);
+        assert_eq!(up.config().tracking_mode, TrackingMode::Run);
+    }
+
+    #[test]
+    fn a_run_cannot_be_started_while_general_tracking_is_on() {
+        let (up, log) = general_up(Quirk::None);
+        up.push_zone(90, true, None);
+        up.start_general();
+        wait("general tracking on", || up.status().active_general);
+        up.refresh();
+        wait("next run", || up.status().next_run.is_some());
+        up.start_run();
+        wait("a message", || up.status().message.contains("Stop"));
+        assert!(up.status().active_run.is_none());
+        assert!(requests(&log, "/start").iter().all(|r| r.path == "/api/tracker/presence/start"));
+    }
+
+    #[test]
+    fn the_server_saying_it_is_not_on_stops_general_tracking() {
+        let (up, _log) = general_up(Quirk::PresenceConflict);
+        up.push_zone(90, true, None);
+        up.start_general();
+        wait("tracking stopped", || up.status().message.contains("Tracking stopped"));
+        assert!(!up.status().active_general);
+    }
+
+    #[test]
+    fn another_client_taking_over_stops_general_tracking() {
+        let (up, _log) = general_up(Quirk::PresenceIgnored);
+        up.push_zone(90, true, None);
+        up.start_general();
+        wait("general tracking on", || up.status().active_general);
+        up.set_position(Some(Pos { x: 1.0, y: 1.0, z: 0.0 }));
+        wait("took over", || up.status().message.contains("took over"));
+        assert!(!up.status().active_general);
+    }
+
+    #[test]
+    fn dropping_the_uplink_in_general_mode_sends_the_tidy_end() {
+        let (up, log) = general_up(Quirk::None);
+        up.push_zone(90, true, None);
+        up.start_general();
+        wait("general tracking on", || up.status().active_general);
+        drop(up);
+        wait("the tidy end", || !at(&log, "/api/tracker/presence/end").is_empty());
     }
 
     #[test]
