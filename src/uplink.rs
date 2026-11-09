@@ -1509,5 +1509,40 @@ mod tests {
         assert_eq!(xs.first(), Some(&1000));
         up.end_run();
         wait("end", || up.status().active_run.is_none());
+
+        // General tracking (no run): the same trail, listed with no run id, then gone once it is stopped.
+        let general = Uplink::with_base(&base, true, None, Timing { heartbeat: Duration::from_secs(1), position_beat: Duration::from_millis(500), retry_base: Duration::from_millis(50), sample: Duration::from_millis(100) });
+        general.update_config(|c| {
+            c.token = up.config().token;
+            c.tracking_mode = TrackingMode::General;
+        });
+        general.push_zone(430, true, Some([-24576.0, -24576.0, 24576.0, 24576.0]));
+        general.start_general();
+        wait("general tracking on", || general.status().active_general);
+        let listed = |api: &Api, token: &str| -> Vec<Value> {
+            let v = api.get("/api/live-trails", token).unwrap();
+            v["trails"].as_array().unwrap().iter().filter(|t| t["run_id"].is_null()).cloned().collect()
+        };
+        let token = up.config().token;
+        let baseline = listed(&api, &token).len(); // other general trackers in the sample data
+        for i in 1..=4 {
+            thread::sleep(Duration::from_millis(150));
+            general.set_position(Some(Pos { x: 2000.0 + 100.0 * i as f32, y: -3000.0, z: 0.0 }));
+        }
+        let mut gx: Vec<i64> = Vec::new();
+        wait("the general trail to reach the server", || {
+            gx = listed(&api, &token)
+                .iter()
+                .find(|t| t["points"].as_array().is_some_and(|p| p.iter().step_by(2).any(|x| x.as_i64() == Some(2100))))
+                .map(|t| t["points"].as_array().unwrap().iter().step_by(2).filter_map(Value::as_i64).collect())
+                .unwrap_or_default();
+            gx.last() == Some(&2400)
+        });
+        println!("general trail x values on the server: {gx:?}");
+        assert!(gx.windows(2).all(|w| w[0] <= w[1]), "points out of order: {gx:?}");
+        general.end_general();
+        wait("general tracking off", || !general.status().active_general);
+        thread::sleep(Duration::from_secs(6)); // past the server's 5 s cache
+        assert!(listed(&api, &token).len() < baseline + 1, "the general trail is still listed after Stop tracking");
     }
 }

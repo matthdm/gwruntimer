@@ -298,6 +298,40 @@ impl ZoneTimer {
         }
 
         ui.separator();
+        let general_mode = cfg.tracking_mode == uplink::TrackingMode::General;
+        let tracking = status.active_run.is_some() || status.active_general;
+        // Runner tracking follows a run for customers; general tracking just shows where you are. Fixed while tracking.
+        let mut mode = if general_mode { 1 } else { 0 };
+        ui.disabled(tracking, || {
+            let a = ui.radio_button("Runner tracking (a run)##tips_mode", &mut mode, 0);
+            ui.same_line();
+            let b = ui.radio_button("General tracking (no run)##tips_mode", &mut mode, 1);
+            if a || b {
+                let chosen = if mode == 1 { uplink::TrackingMode::General } else { uplink::TrackingMode::Run };
+                up.update_config(|c| c.tracking_mode = chosen);
+            }
+        });
+        ui.separator();
+        if general_mode {
+            ui.text_wrapped("Starting general tracking makes your position and zone trail public on the TIPS map until you stop. It is not tied to a run.");
+            if status.active_general {
+                if ui.button("Stop tracking##tips") {
+                    up.end_general();
+                }
+            } else if ui.button("Start tracking##tips") {
+                up.start_general();
+            }
+            if status.busy {
+                ui.same_line();
+                ui.text_disabled("working...");
+            }
+            if status.active_general {
+                ui.text_colored([0.2, 0.9, 0.35, 1.0], "Tracking: broadcasting your position.");
+            }
+            if !status.message.is_empty() {
+                ui.text_wrapped(&status.message);
+            }
+        } else {
         if let Some(run) = &status.next_run {
             ui.text(format!("Next run: {} ({})", run.title, run.status));
             if let Some(route) = &run.route_name {
@@ -333,13 +367,16 @@ impl ZoneTimer {
         if !status.message.is_empty() {
             ui.text_wrapped(&status.message);
         }
+        }
 
         ui.separator();
-        let mut share = cfg.share_position;
-        if ui.checkbox("Share my position on the map (x/y)", &mut share) {
-            up.update_config(|c| c.share_position = share);
+        if !general_mode {
+            let mut share = cfg.share_position;
+            if ui.checkbox("Share my position on the map (x/y)", &mut share) {
+                up.update_config(|c| c.share_position = share);
+            }
+            ui.text_disabled("Off by default. When on, your x/y inside the map is sent so the site can place you on it.");
         }
-        ui.text_disabled("Off by default. When on, your x/y inside the map is sent so the site can place you on it.");
         let labels: Vec<&str> = position::Source::ALL.iter().map(|s| s.label()).collect();
         let mut idx = cfg.position_source.min(labels.len() - 1);
         ui.set_next_item_width(320.0);

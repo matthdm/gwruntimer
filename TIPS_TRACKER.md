@@ -16,6 +16,18 @@ it, so customers can follow a run. The existing timer is unchanged: the tracker 
 
 The token is saved in `tips_tracker.cfg` next to the DLL. Treat it like a password: it can post as you.
 
+## Two modes
+
+- **Runner tracking (a run)**: what is described above. Tied to a run: Start run to begin, End run to stop.
+- **General tracking (no run)**: pick it in the panel's mode choice. **Start tracking** makes your position and the trail
+  of where you have been in the current zone public on the TIPS map until you press **Stop tracking**, with no run behind
+  it. Use it to show an experimental route, or the way through a zone. Starting it is the consent, so the Share tick is
+  not needed. It shows on the map page only (marked "exploring"), and a live run's dot replaces it while you are on a run.
+  The mode cannot be changed while tracking.
+
+A relaunched game takes over from its old session: press Start run (or Start tracking) again and the server hands it to
+the new session instead of locking you out.
+
 ## What it sends
 
 Only between Start run and End run, over HTTPS to the compiled-in host: the map ID, whether it's a town or explorable area,
