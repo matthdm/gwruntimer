@@ -246,6 +246,12 @@ impl Uplink {
         self.send(Cmd::Zone);
     }
 
+    /// Whether the game loop has reported a map yet. It reports one on every map load, but not for a map that was
+    /// already loaded when the tracker started, so the loop checks this and seeds the current map.
+    pub fn knows_map(&self) -> bool {
+        self.shared.latest.lock().unwrap().map_id.is_some()
+    }
+
     /// True when sharing is on, a map is known, and its bounds are not: the caller should read them and `set_bounds`.
     pub fn wants_bounds(&self) -> bool {
         let l = self.shared.latest.lock().unwrap();
@@ -984,6 +990,22 @@ mod tests {
         let count = requests(&log, "/zone").iter().filter(|r| r.body.get("bounds").is_some()).count();
         thread::sleep(Duration::from_millis(1500));
         assert_eq!(requests(&log, "/zone").iter().filter(|r| r.body.get("bounds").is_some()).count(), count, "the bounds were sent again and again");
+    }
+
+    #[test]
+    fn a_run_started_inside_an_already_loaded_map_still_reports_that_map() {
+        // The DLL can be injected (or Start run pressed) while standing in a map that loaded earlier, so there is
+        // no zone change to learn it from: the caller seeds it, and the first zone request carries it.
+        let (up, log) = start_slow_beat();
+        assert!(!up.knows_map(), "no map is known before the game loop reports one");
+        up.update_config(|c| c.share_position = true);
+        up.push_zone(430, true, Some([-24576.0, -24576.0, 24576.0, 24576.0]));
+        assert!(up.knows_map());
+        track(&up);
+        wait("a zone request", || !requests(&log, "/zone").is_empty());
+        let z = &requests(&log, "/zone")[0];
+        assert_eq!(z.body["map_id"], 430);
+        assert_eq!(z.body["bounds"], json!([-24576.0, -24576.0, 24576.0, 24576.0]));
     }
 
     #[test]

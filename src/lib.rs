@@ -799,6 +799,13 @@ impl ImguiRenderLoop for ZoneTimer {
             }
             self.state.last_load_state = map_data.is_loaded();
             if map_data.is_loaded() {
+                // A map that was already loaded when the tracker started has no load to report it from.
+                if let Some(up) = &self.uplink {
+                    if !up.knows_map() {
+                        let bounds = if up.sharing() { position::read_bounds() } else { None };
+                        up.push_zone(map_data.map_id, map_data.is_explorable != 0, bounds);
+                    }
+                }
                 self.sample_position();
             }
         }
