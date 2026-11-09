@@ -7,7 +7,9 @@ it, so customers can follow a run. The existing timer is unchanged: the tracker 
 ## Using it
 
 1. On the TIPS site, open **My shop → Live tracking** and make a tracker token.
-2. In game, hold **Ctrl+Shift**, right-click the timer and choose **TIPS Tracker**.
+2. In game, hold **Ctrl+Shift**, right-click the timer and choose **TIPS Tracker**. The panel then stays interactive
+   after you let go of the keys, so you can type and paste. Press **Lock (click-through)** to hand the mouse and
+   keyboard back to the game (the panel stays on screen), or **Close** to hide it.
 3. Paste the token and press **Save**. Your next run appears. Press **Start run** when you set off, **End run** when done.
    (The run also ends itself when the route's last map is reached.)
 4. Optional: tick **Share my position on the map (x/y)**. Off by default.

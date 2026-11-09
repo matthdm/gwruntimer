@@ -105,6 +105,10 @@ struct ZoneTimer {
     /// TIPS live tracking (see uplink.rs). Created in `initialize`.
     uplink: Option<uplink::Uplink>,
     show_tips: bool,
+    /// The TIPS panel takes the mouse and keyboard (so a token can be typed or pasted) without holding
+    /// Ctrl+Shift. Opened from the context menu, left with the panel's Lock button.
+    tips_edit: bool,
+    was_tips_edit: bool,
     /// Text box contents for the tracker token.
     tips_token_input: String,
     probe: position::Probe,
@@ -137,6 +141,8 @@ impl Default for ZoneTimer {
             in_full_edit_mode: false,
             uplink: None,
             show_tips: false,
+            tips_edit: false,
+            was_tips_edit: false,
             tips_token_input: String::new(),
             probe: position::Probe::default(),
             last_pos_read: None,
@@ -251,8 +257,21 @@ impl ZoneTimer {
             ui.text("The tracker isn't available.");
             return;
         };
-        if !edit {
-            ui.text_disabled("Hold Ctrl+Shift to type and click.");
+        if edit {
+            if self.tips_edit {
+                if ui.button("Lock (click-through)") {
+                    self.tips_edit = false;
+                }
+                ui.same_line();
+                if ui.button("Close##tips_close") {
+                    self.show_tips = false;
+                    self.tips_edit = false;
+                }
+                ui.same_line();
+                ui.text_disabled("Locked, the panel stays on screen but the mouse and keyboard go to the game.");
+            }
+        } else {
+            ui.text_disabled("Locked. Hold Ctrl+Shift, right-click the timer, TIPS Tracker to edit.");
         }
         let status = up.status();
         let cfg = up.config();
@@ -836,7 +855,14 @@ impl ImguiRenderLoop for ZoneTimer {
                         self.show_records = !self.show_records;
                     }
                     if ui.menu_item_config("TIPS Tracker").selected(self.show_tips).build() {
-                        self.show_tips = !self.show_tips;
+                        // Closed -> open and editable. Open but locked -> editable. Editable -> close.
+                        if self.show_tips && self.tips_edit {
+                            self.show_tips = false;
+                            self.tips_edit = false;
+                        } else {
+                            self.show_tips = true;
+                            self.tips_edit = true;
+                        }
                     }
 
                     ui.separator();
@@ -889,14 +915,20 @@ impl ImguiRenderLoop for ZoneTimer {
         }
 
         // TIPS live-tracking panel, opened via the right-click menu.
+        if !self.show_tips {
+            self.tips_edit = false;
+        }
         if self.show_tips {
+            let tips_interactive = edit || self.tips_edit;
             ui.window("TIPS Tracker##tips_window")
                 .size([470.0, 430.0], Condition::FirstUseEver)
-                .flags(if edit { WindowFlags::empty() } else { overlay_flags })
+                .flags(if tips_interactive { WindowFlags::empty() } else { overlay_flags })
                 .build(|| {
-                    self.render_tips(ui, edit);
+                    self.render_tips(ui, tips_interactive);
                 });
         }
+        let left_tips_edit = self.was_tips_edit && !self.tips_edit;
+        self.was_tips_edit = self.tips_edit;
 
         if std::mem::take(&mut self.confirm_delete_route) {
             ui.open_popup("Delete Route History?");
@@ -934,14 +966,14 @@ impl ImguiRenderLoop for ZoneTimer {
             }
         }
 
-        if left_edit {
+        if (left_edit && !self.tips_edit) || left_tips_edit {
             unsafe { imgui::sys::igSetWindowFocus_Nil() };
         }
     }
 
     fn message_filter(&self, io: &imgui::Io) -> hudhook::MessageFilter {
         let quick_edit_keys_down = io.key_ctrl && io.key_shift;
-        if quick_edit_keys_down { 
+        if quick_edit_keys_down || self.tips_edit {
             let mut filter = hudhook::MessageFilter::empty();
             if io.want_capture_keyboard { filter |= hudhook::MessageFilter::InputKeyboard; }
             if io.want_capture_mouse { filter |= hudhook::MessageFilter::InputMouse; }
