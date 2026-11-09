@@ -33,6 +33,8 @@ const MAX_TOKEN: usize = 100;
 const POSITION_FRESH: Duration = Duration::from_secs(15);
 /// Most position samples kept for the next heartbeat (the server accepts 20 per beat).
 const MAX_POINTS: usize = 20;
+/// How often a zone is re-reported to get its bounds to the server before giving up on it.
+const MAX_ZONE_RETRIES: u32 = 3;
 
 // ---------- settings ----------
 
@@ -62,8 +64,12 @@ impl Config {
                 "token" if v.len() <= MAX_TOKEN => c.token = v.to_string(),
                 "share_position" => c.share_position = v == "1",
                 "position_source" => {
-                    if let Ok(i) = v.parse() {
-                        c.position_source = i;
+                    // Builds before the movement-vector fix wrote 0 (the agent source, which finds nothing on this
+                    // client) on every save whether or not it was chosen, so a saved 0 is not kept.
+                    if let Ok(i) = v.parse::<usize>() {
+                        if i != 0 {
+                            c.position_source = i;
+                        }
                     }
                 }
                 _ => {}
@@ -129,6 +135,8 @@ struct Latest {
     /// One position per sample interval since the last heartbeat, oldest first. Only filled while sharing.
     samples: VecDeque<(f32, f32)>,
     last_sample: Option<Instant>,
+    /// Bumped on every map change, so samples taken in one zone are never filed under another.
+    zone_gen: u64,
 }
 
 impl Latest {
@@ -145,7 +153,11 @@ impl Latest {
     }
 
     /// Puts samples that could not be sent back in front of any newer ones, keeping the newest `MAX_POINTS`.
-    fn restore_samples(&mut self, mut unsent: Vec<(f32, f32)>) {
+    /// Samples from an earlier zone (`zone` is no longer current) are dropped: they belong to a map we have left.
+    fn restore_samples(&mut self, zone: u64, mut unsent: Vec<(f32, f32)>) {
+        if zone != self.zone_gen {
+            return;
+        }
         unsent.extend(self.samples.drain(..));
         let skip = unsent.len().saturating_sub(MAX_POINTS);
         self.samples = unsent.into_iter().skip(skip).collect();
@@ -242,6 +254,7 @@ impl Uplink {
             l.bounds = bounds;
             l.pos = None; // the old position belongs to the old map
             l.clear_samples(); // and so does its trail
+            l.zone_gen += 1;
         }
         self.send(Cmd::Zone);
     }
@@ -384,11 +397,17 @@ struct Worker {
     last_beat: Instant,
     /// Whether the server has this zone's bounds (a zone request sent while sharing carried them).
     bounds_sent: bool,
+    /// How many times this zone (`retry_gen`) has been re-reported to get its bounds to the server. Capped, so a
+    /// zone the server keeps refusing cannot starve the heartbeats.
+    retry_gen: u64,
+    zone_retries: u32,
+    /// Whether sharing was on at the last beat, to notice the moment it is switched off.
+    was_sharing: bool,
 }
 
 impl Worker {
     fn new(base: &str, allow_http: bool, timing: Timing, shared: Arc<Shared>) -> Worker {
-        Worker { api: Api::new(base, allow_http), timing, shared, session: new_session_id(), active: None, last_beat: Instant::now(), bounds_sent: false }
+        Worker { api: Api::new(base, allow_http), timing, shared, session: new_session_id(), active: None, last_beat: Instant::now(), bounds_sent: false, retry_gen: 0, zone_retries: 0, was_sharing: false }
     }
 
     fn run(mut self, rx: Receiver<Cmd>) {
@@ -445,12 +464,16 @@ impl Worker {
         body
     }
 
-    /// The samples kept since the last heartbeat, taken out of the buffer; empty unless sharing is on.
-    fn take_samples(&self) -> Vec<(f32, f32)> {
-        if !self.sharing() {
-            return Vec::new();
+    /// The samples kept since the last heartbeat, taken out of the buffer, with the zone they belong to. Empty
+    /// unless sharing is on, and anything waiting from before sharing was switched off is thrown away.
+    fn take_samples(&self) -> (u64, Vec<(f32, f32)>) {
+        let sharing = self.sharing();
+        let mut l = self.shared.latest.lock().unwrap();
+        if !sharing {
+            l.clear_samples();
+            return (l.zone_gen, Vec::new());
         }
-        self.shared.latest.lock().unwrap().samples.drain(..).collect()
+        (l.zone_gen, l.samples.drain(..).collect())
     }
 
     /// One request with retries for network trouble, 429 and 5xx. `attempts` includes the first try.
@@ -588,6 +611,7 @@ impl Worker {
             body["bounds"] = json!(b);
         }
         let path = format!("/api/tracker/runs/{id}/zone");
+        self.bounds_sent = false; // until the server says it has them
         match self.call(4, |api, t| api.post(&path, t, &body)) {
             Ok(v) => {
                 self.last_beat = Instant::now();
@@ -616,19 +640,33 @@ impl Worker {
     fn tick(&mut self) {
         let Some(id) = self.active.clone() else { return };
         let every = if self.position_to_send().is_some() { self.timing.position_beat } else { self.timing.heartbeat };
-        if self.last_beat.elapsed() < every {
+        let sharing = self.sharing();
+        // Sharing just went off: don't wait for the next beat to clear the dot and trail on the site.
+        let just_off = self.was_sharing && !sharing;
+        self.was_sharing = sharing;
+        if !just_off && self.last_beat.elapsed() < every {
             return;
         }
         self.last_beat = Instant::now();
         // Sharing was switched on after this zone was reported, so the server has no bounds for it: report the zone
         // again (with position and bounds) instead of a plain heartbeat.
-        let need_bounds = !self.bounds_sent && self.position_to_send().is_some() && self.shared.latest.lock().unwrap().bounds.is_some();
-        if need_bounds {
-            self.zone();
-            return;
+        let (zone, has_bounds) = {
+            let l = self.shared.latest.lock().unwrap();
+            (l.zone_gen, l.bounds.is_some())
+        };
+        if !self.bounds_sent && sharing && has_bounds && self.position_to_send().is_some() {
+            if self.retry_gen != zone {
+                self.retry_gen = zone;
+                self.zone_retries = 0;
+            }
+            if self.zone_retries < MAX_ZONE_RETRIES {
+                self.zone_retries += 1;
+                self.zone();
+                return;
+            }
         }
         let mut body = self.with_position(json!({ "client_session": self.session }));
-        let samples = self.take_samples();
+        let (zone, samples) = self.take_samples();
         if !samples.is_empty() {
             body["points"] = json!(samples.iter().map(|(x, y)| json!([x, y])).collect::<Vec<_>>());
         }
@@ -640,7 +678,7 @@ impl Worker {
             }
             Ok(_) => {}
             Err(e) => {
-                self.shared.latest.lock().unwrap().restore_samples(samples); // they were not delivered
+                self.shared.latest.lock().unwrap().restore_samples(zone, samples); // they were not delivered
                 self.failed(&e);
             }
         }
@@ -668,6 +706,11 @@ mod tests {
 
     /// A tiny HTTP server that records requests and answers like the TIPS API.
     fn mock_server(finish_on_map: Option<u64>) -> (String, Arc<Mutex<Vec<Req>>>) {
+        mock_server_with(finish_on_map, false)
+    }
+
+    /// `refuse_bounds`: answer 400 to any zone request that carries `bounds`.
+    fn mock_server_with(finish_on_map: Option<u64>, refuse_bounds: bool) -> (String, Arc<Mutex<Vec<Req>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         let log: Arc<Mutex<Vec<Req>>> = Arc::default();
@@ -709,6 +752,8 @@ mod tests {
                         ("401 Unauthorized", json!({ "error": "Invalid tracker token" }))
                     } else if path.ends_with("/next-run") {
                         ("200 OK", json!({ "run": { "id": "run1", "title": "Beacon's to Drok's", "status": "scheduled", "start_utc": null, "route_name": "Test route" } }))
+                    } else if path.ends_with("/zone") && refuse_bounds && body.get("bounds").is_some() {
+                        ("400 Bad Request", json!({ "error": "bounds are not acceptable" }))
                     } else if path.ends_with("/zone") {
                         let finished = Some(body["map_id"].as_u64().unwrap_or(0)) == finish_on_map;
                         ("200 OK", json!({ "ok": true, "progress": if finished { 100 } else { 40 }, "off_route": false, "finished": finished }))
@@ -891,11 +936,72 @@ mod tests {
     fn samples_that_could_not_be_sent_go_back_in_front_of_newer_ones() {
         let mut l = Latest::default();
         l.samples.extend([(3.0, 3.0), (4.0, 4.0)]);
-        l.restore_samples(vec![(1.0, 1.0), (2.0, 2.0)]);
+        l.restore_samples(l.zone_gen, vec![(1.0, 1.0), (2.0, 2.0)]);
         assert_eq!(l.samples.iter().copied().collect::<Vec<_>>(), vec![(1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0)]);
-        l.restore_samples((0..30).map(|i| (i as f32, 0.0)).collect());
+        l.restore_samples(l.zone_gen, (0..30).map(|i| (i as f32, 0.0)).collect());
         assert_eq!(l.samples.len(), MAX_POINTS);
         assert_eq!(l.samples.back(), Some(&(4.0, 4.0)), "the newest survive");
+    }
+
+    #[test]
+    fn samples_from_an_earlier_zone_are_never_put_back() {
+        let mut l = Latest::default();
+        let before = l.zone_gen;
+        l.zone_gen += 1; // the runner zoned while the heartbeat with these samples was in flight
+        l.restore_samples(before, vec![(1.0, 1.0), (2.0, 2.0)]);
+        assert!(l.samples.is_empty(), "the old zone's samples leaked into the new zone");
+    }
+
+    #[test]
+    fn an_old_build_saved_the_broken_agent_source_for_everyone() {
+        // Builds before the movement-vector fix wrote position_source=0 on every save, chosen or not, and the agent
+        // source finds nothing on this client. Only a real choice of the other sources is kept.
+        let movement_a = crate::position::Source::MovementA.to_index();
+        assert_eq!(Config::parse("position_source=0\n").position_source, movement_a);
+        assert_eq!(Config::parse("position_source=1\n").position_source, 1);
+        assert_eq!(Config::parse("position_source=2\n").position_source, 2);
+    }
+
+    #[test]
+    fn switching_sharing_off_clears_the_server_at_once_and_drops_waiting_samples() {
+        let (up, log) = start_slow_beat();
+        up.update_config(|c| c.share_position = true);
+        up.push_zone(90, true, None);
+        track(&up);
+        sample(&up, 1.0, 1.0);
+        wait("a beat that carries the position", || requests(&log, "/heartbeat").iter().any(|r| r.body.get("x").is_some()));
+        sample(&up, 5.0, 5.0); // waiting for the next heartbeat
+        let beats = requests(&log, "/heartbeat").len();
+        up.update_config(|c| c.share_position = false);
+        let off = Instant::now();
+        wait("a beat without a position", || requests(&log, "/heartbeat").iter().skip(beats).any(|r| r.body.get("x").is_none()));
+        assert!(off.elapsed() < Duration::from_millis(450), "took {:?}: the dot would stay public until the next regular beat", off.elapsed());
+        let cleared = requests(&log, "/heartbeat").into_iter().skip(beats).find(|r| r.body.get("x").is_none()).unwrap();
+        assert!(cleared.body.get("points").is_none(), "{cleared:?}");
+        // Switched back on later, nothing from before is sent.
+        up.update_config(|c| c.share_position = true);
+        sample(&up, 9.0, 9.0);
+        let seen = requests(&log, "/heartbeat").len();
+        wait("the next beat with points", || requests(&log, "/heartbeat").iter().skip(seen).any(|r| !points_of(r).is_empty()));
+        let beat = requests(&log, "/heartbeat").into_iter().skip(seen).find(|r| !points_of(r).is_empty()).unwrap();
+        assert_eq!(points_of(&beat), vec![(9.0, 9.0)]);
+    }
+
+    #[test]
+    fn a_zone_the_server_refuses_does_not_stop_the_heartbeats() {
+        let (base, log) = mock_server_with(None, true);
+        let timing = Timing { heartbeat: Duration::from_millis(100), position_beat: Duration::from_millis(100), retry_base: Duration::from_millis(5), sample: Duration::from_millis(20) };
+        let up = Uplink::with_base(&base, true, None, timing);
+        up.update_config(|c| {
+            c.token = "tips_trk_test".into();
+            c.share_position = true;
+        });
+        up.push_zone(90, true, Some([-1.0, -2.0, 3.0, 4.0]));
+        track(&up);
+        up.set_position(Some(Pos { x: 1.0, y: 1.0, z: 0.0 }));
+        wait("heartbeats after the refused zone", || requests(&log, "/heartbeat").len() >= 3);
+        let tries = requests(&log, "/zone").iter().filter(|r| r.body.get("bounds").is_some()).count();
+        assert!(tries <= 4, "{tries} zone requests with bounds: it keeps retrying instead of getting on with heartbeats");
     }
 
     #[test]

@@ -55,10 +55,11 @@ pub fn movement_pos(v: [f32; 3]) -> Pos {
 }
 
 /// The map's coordinate bounds `[min_x, min_y, max_x, max_y]` from the five floats at the start of the map
-/// context (`[unknown, min_x, min_y, max_x, max_y]`). None if any is not finite or a min is not below its max.
+/// context (`[unknown, min_x, min_y, max_x, max_y]`). None if any is not finite or beyond `MAX_COORD` (the server
+/// refuses those), or a min is not below its max.
 pub fn bounds_from(raw: [f32; 5]) -> Option<[f32; 4]> {
     let [_, min_x, min_y, max_x, max_y] = raw;
-    let ok = [min_x, min_y, max_x, max_y].iter().all(|v| v.is_finite()) && min_x < max_x && min_y < max_y;
+    let ok = [min_x, min_y, max_x, max_y].iter().all(|v| v.is_finite() && v.abs() <= MAX_COORD) && min_x < max_x && min_y < max_y;
     ok.then_some([min_x, min_y, max_x, max_y])
 }
 
@@ -322,5 +323,13 @@ mod tests {
         assert_eq!(bounds_from([0.0, f32::NAN, 0.0, 10.0, 10.0]), None);
         assert_eq!(bounds_from([0.0, 0.0, 0.0, f32::INFINITY, 10.0]), None);
         assert_eq!(bounds_from([0.0; 5]), None); // an unset context
+    }
+
+    #[test]
+    fn bounds_the_server_would_refuse_are_not_sent() {
+        // The server rejects anything past +-100000 with a 400, which would stall the run's updates.
+        assert_eq!(bounds_from([0.0, -1.0e6, 0.0, 10.0, 10.0]), None);
+        assert_eq!(bounds_from([0.0, 0.0, 0.0, 10.0, 100_001.0]), None);
+        assert_eq!(bounds_from([0.0, -100_000.0, -100_000.0, 100_000.0, 100_000.0]), Some([-100_000.0, -100_000.0, 100_000.0, 100_000.0]));
     }
 }
