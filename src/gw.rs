@@ -161,6 +161,30 @@ pub fn map_context_addr() -> Option<usize> {
     }
 }
 
+/// Address of the game's character context, if there is one.
+pub fn char_context_addr() -> Option<usize> {
+    unsafe {
+        let pctx = get_context_tls().as_ref()?;
+        let p = pctx.character as usize;
+        (p != 0).then_some(p)
+    }
+}
+
+// `CharContext.controlled` (see CharContext above) and `CharControlledCharacterData.agent_id`.
+const CHAR_CTX_CONTROLLED: usize = 0x680;
+const CONTROLLED_AGENT_ID: usize = 0x14;
+
+/// The controlled character's agent id, read through `read_into` instead of through a reference to the game's structure.
+/// Going through `CharControlledCharacterData::current()` returned a wrong id in some builds; this read is the same
+/// memory but can never fault, and the caller checks the id against the agent array before using it.
+pub fn controlled_agent_id() -> Option<u32> {
+    let controlled = read_u32(char_context_addr()? + CHAR_CTX_CONTROLLED)? as usize;
+    if controlled == 0 {
+        return None;
+    }
+    read_u32(controlled + CONTROLLED_AGENT_ID)
+}
+
 pub fn get_instance_uptime() -> Option<& 'static u32> {
     unsafe {
         let pctx = get_context_tls().as_ref()?;

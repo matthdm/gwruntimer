@@ -243,7 +243,7 @@ impl ZoneTimer {
             return;
         }
         self.last_pos_read = Some(Instant::now());
-        let Some(agent_id) = gw::CharControlledCharacterData::current().map(|c| c.agent_id) else { return };
+        let Some(agent_id) = gw::controlled_agent_id() else { return };
         let reading = position::read(agent_id, gw::agent_context_addr());
         let source = position::Source::from_index(up.config().position_source);
         up.set_position(reading.pick(source));
