@@ -304,6 +304,13 @@ impl Uplink {
     }
 }
 
+/// The uplink to use: the one already running if there is one, else a new one from `make`. The overlay is
+/// initialized again after every Direct3D device reset (loading screens), and replacing a running uplink drops
+/// it, which ends the run it was tracking.
+pub fn ensure(slot: &mut Option<Uplink>, make: impl FnOnce() -> Uplink) -> &Uplink {
+    slot.get_or_insert_with(make)
+}
+
 // ---------- HTTP ----------
 
 #[derive(Debug)]
@@ -1112,6 +1119,37 @@ mod tests {
         let z = &requests(&log, "/zone")[0];
         assert_eq!(z.body["map_id"], 430);
         assert_eq!(z.body["bounds"], json!([-24576.0, -24576.0, 24576.0, 24576.0]));
+    }
+
+    #[test]
+    fn dropping_a_tracking_uplink_ends_its_run() {
+        // This is on purpose (the game or the tracker is closing), and it is why the uplink must outlive the
+        // overlay re-initializing itself: replacing it would end the runner's run.
+        let (up, log) = start_uplink(None);
+        up.push_zone(55, false, None);
+        track(&up);
+        drop(up);
+        wait("the tidy end request", || !requests(&log, "/end").is_empty());
+    }
+
+    #[test]
+    fn the_overlay_reinitializing_keeps_the_running_uplink_and_its_run() {
+        // hudhook calls `initialize` again after every Direct3D device reset (a loading screen). Each time it
+        // asks for an uplink; it must get the one already tracking, not a new one that drops it.
+        let (base, log) = mock_server(None);
+        let make = || {
+            let up = Uplink::with_base(&base, true, None, fast());
+            up.update_config(|c| c.token = "tips_trk_test".into());
+            up
+        };
+        let mut slot: Option<Uplink> = None;
+        ensure(&mut slot, make);
+        track(slot.as_ref().unwrap());
+        ensure(&mut slot, make); // the device was reset
+        ensure(&mut slot, make); // and again
+        thread::sleep(Duration::from_millis(700));
+        assert!(requests(&log, "/end").is_empty(), "the run was ended by a re-initialize: {:?}", requests(&log, "/end"));
+        assert!(slot.as_ref().unwrap().status().active_run.is_some());
     }
 
     #[test]

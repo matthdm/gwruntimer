@@ -755,9 +755,10 @@ impl ImguiRenderLoop for ZoneTimer {
 
         // TIPS tracker: does nothing until a token is entered and Start run is pressed.
         let cfg_path = hudhook::util::get_dll_path().map(|p| p.parent().unwrap().join("tips_tracker.cfg"));
-        let uplink = uplink::Uplink::new(cfg_path);
+        // `initialize` runs again after every Direct3D device reset (a loading screen), on this same object: keep the
+        // running uplink, or its run would be ended each time.
+        let uplink = uplink::ensure(&mut self.uplink, || uplink::Uplink::new(cfg_path));
         self.tips_token_input = uplink.config().token;
-        self.uplink = Some(uplink);
     }
 
     fn render(&mut self, ui: &mut imgui::Ui) {
