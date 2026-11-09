@@ -650,6 +650,12 @@ impl Worker {
         if self.general {
             return;
         }
+        // The mode can be flipped between pressing Start tracking and the worker getting to it. Only start what the
+        // panel still offers, or the runner would broadcast with the wrong controls on screen.
+        if self.shared.config.lock().unwrap().tracking_mode != TrackingMode::General {
+            self.say("Choose General tracking first.");
+            return;
+        }
         if self.active.is_some() {
             self.say("End your run before starting general tracking.");
             return;
@@ -680,13 +686,18 @@ impl Worker {
         self.stop_run();
         match result {
             Ok(_) => self.say("Tracking stopped."),
-            Err(e) => self.failed(&e),
+            // The server still has the dot until it times out, so don't let the runner think it is gone.
+            Err(e) => self.say(format!("{} Your dot stays on the map until it expires (about 15 minutes). Press Start tracking, then Stop tracking, to try again.", e.text())),
         }
     }
 
     fn start_run(&mut self) {
         if self.general {
             self.say("Stop general tracking before starting a run.");
+            return;
+        }
+        if self.shared.config.lock().unwrap().tracking_mode == TrackingMode::General {
+            self.say("Choose Runner tracking first.");
             return;
         }
         let Some(run) = self.shared.status.lock().unwrap().next_run.clone() else {
@@ -854,6 +865,8 @@ mod tests {
         PresenceConflict,
         /// `ignored: true` to presence heartbeats (another game client took over).
         PresenceIgnored,
+        /// 500 to presence end requests (the stop never reaches the server).
+        PresenceEndFails,
     }
 
     fn mock_server_with(finish_on_map: Option<u64>, quirk: Quirk) -> (String, Arc<Mutex<Vec<Req>>>) {
@@ -900,6 +913,8 @@ mod tests {
                         ("200 OK", json!({ "run": { "id": "run1", "title": "Beacon's to Drok's", "status": "scheduled", "start_utc": null, "route_name": "Test route" } }))
                     } else if quirk == Quirk::PresenceConflict && (path == "/api/tracker/presence/zone" || path == "/api/tracker/presence/heartbeat") {
                         ("409 Conflict", json!({ "error": "General tracking is not on" }))
+                    } else if quirk == Quirk::PresenceEndFails && path == "/api/tracker/presence/end" {
+                        ("500 Internal Server Error", json!({ "error": "boom" }))
                     } else if quirk == Quirk::PresenceIgnored && path == "/api/tracker/presence/heartbeat" {
                         ("200 OK", json!({ "ok": true, "ignored": true }))
                     } else if path.ends_with("/zone") && quirk == Quirk::RefuseBounds && body.get("bounds").is_some() {
@@ -1392,6 +1407,38 @@ mod tests {
         wait("tracking off", || !up.status().active_general);
         up.update_config(|c| c.tracking_mode = TrackingMode::Run);
         assert_eq!(up.config().tracking_mode, TrackingMode::Run);
+    }
+
+    #[test]
+    fn a_start_that_no_longer_matches_the_chosen_mode_is_refused() {
+        // The panel's Start button can be pressed, and the mode flipped before the worker gets to the command. A start
+        // for the other mode must not go ahead: the runner would be broadcasting with the wrong controls on screen.
+        let (up, log) = general_up(Quirk::None);
+        up.push_zone(90, true, None);
+        up.update_config(|c| c.tracking_mode = TrackingMode::Run);
+        up.start_general();
+        wait("a message", || up.status().message.contains("General tracking"));
+        assert!(!up.status().active_general);
+        assert!(at(&log, "/api/tracker/presence/start").is_empty(), "the start went to the server anyway");
+        // And the other way round.
+        up.update_config(|c| c.tracking_mode = TrackingMode::General);
+        up.refresh();
+        wait("next run", || up.status().next_run.is_some());
+        up.start_run();
+        wait("a message", || up.status().message.contains("Runner tracking"));
+        assert!(up.status().active_run.is_none());
+        assert!(requests(&log, "/start").is_empty(), "the run start went to the server anyway");
+    }
+
+    #[test]
+    fn a_stop_that_cannot_reach_the_server_says_the_dot_stays_up() {
+        let (up, _log) = general_up(Quirk::PresenceEndFails);
+        up.push_zone(90, true, None);
+        up.start_general();
+        wait("general tracking on", || up.status().active_general);
+        up.end_general();
+        wait("tracking off", || !up.status().active_general);
+        wait("the warning", || up.status().message.contains("stays on the map"));
     }
 
     #[test]

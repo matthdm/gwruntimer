@@ -298,11 +298,12 @@ impl ZoneTimer {
         }
 
         ui.separator();
-        let general_mode = cfg.tracking_mode == uplink::TrackingMode::General;
+        // Show the controls for what is actually running, whatever the saved mode says, so a runner can always stop.
+        let general_mode = status.active_general || (status.active_run.is_none() && cfg.tracking_mode == uplink::TrackingMode::General);
         let tracking = status.active_run.is_some() || status.active_general;
         // Runner tracking follows a run for customers; general tracking just shows where you are. Fixed while tracking.
         let mut mode = if general_mode { 1 } else { 0 };
-        ui.disabled(tracking, || {
+        ui.disabled(tracking || status.busy, || {
             let a = ui.radio_button("Runner tracking (a run)##tips_mode", &mut mode, 0);
             ui.same_line();
             let b = ui.radio_button("General tracking (no run)##tips_mode", &mut mode, 1);
@@ -794,8 +795,12 @@ impl ImguiRenderLoop for ZoneTimer {
         let cfg_path = hudhook::util::get_dll_path().map(|p| p.parent().unwrap().join("tips_tracker.cfg"));
         // `initialize` runs again after every Direct3D device reset (a loading screen), on this same object: keep the
         // running uplink, or its run would be ended each time.
+        let first = self.uplink.is_none();
         let uplink = uplink::ensure(&mut self.uplink, || uplink::Uplink::new(cfg_path));
-        self.tips_token_input = uplink.config().token;
+        if first {
+            // Not on a re-initialize: a token being typed would be wiped by a loading screen.
+            self.tips_token_input = uplink.config().token;
+        }
     }
 
     fn render(&mut self, ui: &mut imgui::Ui) {
