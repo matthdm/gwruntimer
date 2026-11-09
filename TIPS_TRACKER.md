@@ -42,11 +42,12 @@ Full contract: `docs/tracker-protocol.md` in the tips-run repo.
 
 - `src/uplink.rs`: background thread, bounded channel, HTTPS client (ureq + rustls), retry with backoff. The game's render
   thread only touches a mutex and the channel, so the network can never stall a frame.
-- `src/position.rs`: reads the character's x/y from the `AgentMovement` vector at +0x64 (the default source; its first float is
-  unused, then x, then y) and the map's coordinate bounds from the map context. GWCA's agent-array pattern does not match this
-  client. Every read goes through `ReadProcessMemory` on our own process, which fails instead of crashing the game. The panel's
-  *Position debug* section shows every candidate so you can see which one moves as you walk, and the **Position source** box
-  picks which one is sent (a choice saved in `tips_tracker.cfg` is kept).
+- `src/position.rs`: reads the character's x/y from the `AgentMovement` vectors at +0x64 and +0x74 (same layout: an unused
+  float, then x, then y) and the map's coordinate bounds from the map context. Every read goes through `ReadProcessMemory`
+  on our own process, which fails instead of crashing the game. The panel's *Position debug* section shows both vectors so you
+  can see them move as you walk, and the **Position source** box picks which one is sent (both read the same on the client
+  tested; +0x64 is the default).
+- `src/clipboard.rs`: the Windows clipboard for imgui, so Ctrl+V pastes into the token box (imgui is built without its own).
 - `src/lib.rs`: a few lines in the zone-change branch, a once-a-quarter-second position sample, and the panel.
 
 ## Building

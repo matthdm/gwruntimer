@@ -98,12 +98,9 @@ impl Config {
                 "token" if v.len() <= MAX_TOKEN => c.token = v.to_string(),
                 "share_position" => c.share_position = v == "1",
                 "position_source" => {
-                    // Builds before the movement-vector fix wrote 0 (the agent source, which finds nothing on this
-                    // client) on every save whether or not it was chosen, so a saved 0 is not kept.
-                    if let Ok(i) = v.parse::<usize>() {
-                        if i != 0 {
-                            c.position_source = i;
-                        }
+                    // An index that is not in the list (e.g. one saved when there was a third source) is the default.
+                    if let Some(i) = v.parse::<usize>().ok().filter(|i| *i < crate::position::Source::ALL.len()) {
+                        c.position_source = i;
                     }
                 }
                 "tracking_mode" => {
@@ -968,7 +965,7 @@ mod tests {
 
     #[test]
     fn config_round_trips_and_ignores_junk() {
-        let c = Config { token: "tips_trk_abc".into(), share_position: true, position_source: 2, tracking_mode: TrackingMode::General };
+        let c = Config { token: "tips_trk_abc".into(), share_position: true, position_source: 1, tracking_mode: TrackingMode::General };
         assert_eq!(Config::parse(&c.serialize()), c);
         let junk = Config::parse("nonsense\ntoken=short\n=\nshare_position=maybe\nposition_source=x\nunknown=1\n");
         assert_eq!(junk, Config { token: "short".into(), share_position: false, position_source: crate::position::Source::MovementA.to_index(), tracking_mode: TrackingMode::Run });
@@ -1118,13 +1115,13 @@ mod tests {
     }
 
     #[test]
-    fn an_old_build_saved_the_broken_agent_source_for_everyone() {
-        // Builds before the movement-vector fix wrote position_source=0 on every save, chosen or not, and the agent
-        // source finds nothing on this client. Only a real choice of the other sources is kept.
-        let movement_a = crate::position::Source::MovementA.to_index();
-        assert_eq!(Config::parse("position_source=0\n").position_source, movement_a);
-        assert_eq!(Config::parse("position_source=1\n").position_source, 1);
-        assert_eq!(Config::parse("position_source=2\n").position_source, 2);
+    fn a_saved_position_source_that_no_longer_exists_means_the_default() {
+        use crate::position::Source;
+        assert_eq!(Config::parse("position_source=0\n").position_source, Source::MovementA.to_index());
+        assert_eq!(Config::parse("position_source=1\n").position_source, Source::MovementB.to_index());
+        // The agent-array source (the old index 0) is gone, so the old indexes shifted: anything past the list is the default.
+        assert_eq!(Config::parse("position_source=2\n").position_source, Source::MovementA.to_index());
+        assert_eq!(Config::parse("position_source=99\n").position_source, Source::MovementA.to_index());
     }
 
     #[test]

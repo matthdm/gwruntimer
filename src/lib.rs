@@ -3,7 +3,6 @@ mod gw;
 mod run_log;
 mod map_names;
 mod categories;
-mod mapdump;
 mod position;
 mod clipboard;
 mod uplink;
@@ -113,8 +112,6 @@ struct ZoneTimer {
     was_tips_edit: bool,
     /// Text box contents for the tracker token.
     tips_token_input: String,
-    probe: position::Probe,
-    recorder: mapdump::Recorder,
     last_pos_read: Option<Instant>,
     last_reading: Option<position::Reading>,
 }
@@ -147,8 +144,6 @@ impl Default for ZoneTimer {
             tips_edit: false,
             was_tips_edit: false,
             tips_token_input: String::new(),
-            probe: position::Probe::default(),
-            recorder: mapdump::Recorder::default(),
             last_pos_read: None,
             last_reading: None,
             state: ZoneTimerState {
@@ -249,15 +244,11 @@ impl ZoneTimer {
         }
         self.last_pos_read = Some(Instant::now());
         let Some(agent_id) = gw::CharControlledCharacterData::current().map(|c| c.agent_id) else { return };
-        let reading = self.probe.read(agent_id, gw::agent_context_addr());
+        let reading = position::read(agent_id, gw::agent_context_addr());
         let source = position::Source::from_index(up.config().position_source);
         up.set_position(reading.pick(source));
         if up.wants_bounds() {
             up.set_bounds(position::read_bounds()); // sharing was switched on after this map loaded
-        }
-        if self.recorder.recording {
-            let map_id = gw::MissionMapData::current().map_or(0, |m| m.map_id);
-            self.recorder.push(map_id, &reading, position::read_bounds_raw());
         }
         self.last_reading = Some(reading);
     }
@@ -389,40 +380,14 @@ impl ZoneTimer {
             match &self.last_reading {
                 None => ui.text("No reading yet. Enter an explorable area or town."),
                 Some(r) => {
-                    ui.text(format!("Agent id: {}   agent array found: {}", r.agent_id, r.array_found));
+                    ui.text(format!("Agent id: {}", r.agent_id));
                     let show = |ui: &imgui::Ui, name: &str, p: &Option<position::Pos>| match p {
-                        Some(p) => ui.text(format!("{name}: x {:.1}  y {:.1}  z {:.1}", p.x, p.y, p.z)),
+                        Some(p) => ui.text(format!("{name}: x {:.1}  y {:.1}", p.x, p.y)),
                         None => ui.text(format!("{name}: not readable")),
                     };
-                    show(ui, "Agent position", &r.agent);
-                    if let Some(plane) = r.plane {
-                        ui.text(format!("Plane: {plane}"));
-                    }
-                    // The first float of a movement vector is unused (always 0); x and y are the next two. z shows that first float.
-                    show(ui, "Movement A (+0x64, z = unused first float)", &r.movement_a);
-                    show(ui, "Movement B (+0x74, z = unused first float)", &r.movement_b);
+                    show(ui, "Movement A (+0x64)", &r.movement_a);
+                    show(ui, "Movement B (+0x74)", &r.movement_b);
                 }
-            }
-        }
-
-        if ui.collapsing_header("Map data spike (throwaway experiment)", TreeNodeFlags::empty()) {
-            ui.text_wrapped("Saves the game's own map rectangles, this map's bounds and a recording of your walk to tips_mapdump.json next to the DLL. Nothing is sent anywhere.");
-            if self.recorder.recording {
-                if ui.button("Stop recording") {
-                    self.recorder.recording = false;
-                }
-                ui.same_line();
-                ui.text(format!("recording, {} samples", self.recorder.len()));
-            } else if ui.button("Record my walk") {
-                self.recorder.start();
-            }
-            if ui.button("Save map data file") {
-                let path = hudhook::util::get_dll_path().map(|p| p.parent().unwrap().join("tips_mapdump.json"));
-                let current = gw::MissionMapData::current().map(|m| (m.map_id, m.is_explorable != 0));
-                self.recorder.save(path, current);
-            }
-            if !self.recorder.message.is_empty() {
-                ui.text_wrapped(&self.recorder.message);
             }
         }
 
