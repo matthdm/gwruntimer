@@ -9,6 +9,7 @@
 //! - HTTPS only, to the compiled-in host. Responses are size-capped and only a few fields are read.
 
 use std::collections::hash_map::RandomState;
+use std::collections::VecDeque;
 use std::hash::BuildHasher;
 use std::path::PathBuf;
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
@@ -30,6 +31,8 @@ const MAX_RESPONSE: u64 = 8 * 1024;
 const MAX_TOKEN: usize = 100;
 /// A position older than this is not sent.
 const POSITION_FRESH: Duration = Duration::from_secs(15);
+/// Most position samples kept for the next heartbeat (the server accepts 20 per beat).
+const MAX_POINTS: usize = 20;
 
 // ---------- settings ----------
 
@@ -101,11 +104,18 @@ pub struct Timing {
     /// Heartbeat interval while sharing position, so the marker moves.
     pub position_beat: Duration,
     pub retry_base: Duration,
+    /// How often a position is kept for the trail while sharing.
+    pub sample: Duration,
 }
 
 impl Default for Timing {
     fn default() -> Self {
-        Timing { heartbeat: Duration::from_secs(30), position_beat: Duration::from_secs(5), retry_base: Duration::from_secs(1) }
+        Timing {
+            heartbeat: Duration::from_secs(30),
+            position_beat: Duration::from_secs(5),
+            retry_base: Duration::from_secs(1),
+            sample: Duration::from_secs(1),
+        }
     }
 }
 
@@ -113,7 +123,38 @@ impl Default for Timing {
 struct Latest {
     map_id: Option<u32>,
     explorable: bool,
+    /// The current map's coordinate bounds `[min_x, min_y, max_x, max_y]`. Only ever filled while sharing.
+    bounds: Option<[f32; 4]>,
     pos: Option<(Pos, Instant)>,
+    /// One position per sample interval since the last heartbeat, oldest first. Only filled while sharing.
+    samples: VecDeque<(f32, f32)>,
+    last_sample: Option<Instant>,
+}
+
+impl Latest {
+    /// Keeps `(x, y)` if a sample interval has passed since the last kept one; never more than `MAX_POINTS`.
+    fn add_sample(&mut self, x: f32, y: f32, now: Instant, every: Duration) {
+        if self.last_sample.is_some_and(|t| now.saturating_duration_since(t) < every) {
+            return;
+        }
+        self.last_sample = Some(now);
+        self.samples.push_back((x, y));
+        while self.samples.len() > MAX_POINTS {
+            self.samples.pop_front();
+        }
+    }
+
+    /// Puts samples that could not be sent back in front of any newer ones, keeping the newest `MAX_POINTS`.
+    fn restore_samples(&mut self, mut unsent: Vec<(f32, f32)>) {
+        unsent.extend(self.samples.drain(..));
+        let skip = unsent.len().saturating_sub(MAX_POINTS);
+        self.samples = unsent.into_iter().skip(skip).collect();
+    }
+
+    fn clear_samples(&mut self) {
+        self.samples.clear();
+        self.last_sample = None;
+    }
 }
 
 struct Shared {
@@ -121,6 +162,7 @@ struct Shared {
     config: Mutex<Config>,
     latest: Mutex<Latest>,
     config_path: Option<PathBuf>,
+    sample_every: Duration,
 }
 
 enum Cmd {
@@ -150,6 +192,7 @@ impl Uplink {
             config: Mutex::new(config),
             latest: Mutex::new(Latest::default()),
             config_path,
+            sample_every: timing.sample,
         });
         let (tx, rx) = sync_channel(64);
         let worker = Worker::new(base, allow_http, timing, shared.clone());
@@ -189,20 +232,46 @@ impl Uplink {
         }
     }
 
-    /// A map finished loading. Cheap and non-blocking; call it from the render loop.
-    pub fn push_zone(&self, map_id: u32, explorable: bool) {
+    /// A map finished loading. Cheap and non-blocking; call it from the render loop. `bounds` is the map's
+    /// coordinate bounds, which the caller reads only while sharing is on (None otherwise).
+    pub fn push_zone(&self, map_id: u32, explorable: bool, bounds: Option<[f32; 4]>) {
         {
             let mut l = self.shared.latest.lock().unwrap();
             l.map_id = Some(map_id);
             l.explorable = explorable;
+            l.bounds = bounds;
             l.pos = None; // the old position belongs to the old map
+            l.clear_samples(); // and so does its trail
         }
         self.send(Cmd::Zone);
     }
 
-    /// The character's latest position, if it could be read. Only ever sent when sharing is on.
+    /// True when sharing is on, a map is known, and its bounds are not: the caller should read them and `set_bounds`.
+    pub fn wants_bounds(&self) -> bool {
+        let l = self.shared.latest.lock().unwrap();
+        l.map_id.is_some() && l.bounds.is_none() && self.sharing()
+    }
+
+    /// The current map's bounds, read after sharing was switched on mid-zone. Ignored while sharing is off.
+    pub fn set_bounds(&self, bounds: Option<[f32; 4]>) {
+        if self.sharing() {
+            self.shared.latest.lock().unwrap().bounds = bounds;
+        }
+    }
+
+    /// The character's latest position, if it could be read. Only ever sent when sharing is on; while it is, one
+    /// position per sample interval is also kept for the zone trail (sent with the next heartbeat).
     pub fn set_position(&self, pos: Option<Pos>) {
-        self.shared.latest.lock().unwrap().pos = pos.filter(Pos::is_sane).map(|p| (p, Instant::now()));
+        let sharing = self.sharing();
+        let pos = pos.filter(Pos::is_sane);
+        let now = Instant::now();
+        let mut l = self.shared.latest.lock().unwrap();
+        l.pos = pos.map(|p| (p, now));
+        match pos {
+            Some(p) if sharing => l.add_sample(p.x, p.y, now, self.shared.sample_every),
+            _ if !sharing => l.clear_samples(),
+            _ => {}
+        }
     }
 
     pub fn refresh(&self) {
@@ -307,11 +376,13 @@ struct Worker {
     session: String,
     active: Option<String>,
     last_beat: Instant,
+    /// Whether the server has this zone's bounds (a zone request sent while sharing carried them).
+    bounds_sent: bool,
 }
 
 impl Worker {
     fn new(base: &str, allow_http: bool, timing: Timing, shared: Arc<Shared>) -> Worker {
-        Worker { api: Api::new(base, allow_http), timing, shared, session: new_session_id(), active: None, last_beat: Instant::now() }
+        Worker { api: Api::new(base, allow_http), timing, shared, session: new_session_id(), active: None, last_beat: Instant::now(), bounds_sent: false }
     }
 
     fn run(mut self, rx: Receiver<Cmd>) {
@@ -366,6 +437,14 @@ impl Worker {
             body["y"] = json!(y);
         }
         body
+    }
+
+    /// The samples kept since the last heartbeat, taken out of the buffer; empty unless sharing is on.
+    fn take_samples(&self) -> Vec<(f32, f32)> {
+        if !self.sharing() {
+            return Vec::new();
+        }
+        self.shared.latest.lock().unwrap().samples.drain(..).collect()
     }
 
     /// One request with retries for network trouble, 429 and 5xx. `attempts` includes the first try.
@@ -459,6 +538,8 @@ impl Worker {
             Ok(_) => {
                 self.active = Some(run.id.clone());
                 self.last_beat = Instant::now();
+                // Whatever was walked before Start run is not part of this run.
+                self.shared.latest.lock().unwrap().clear_samples();
                 {
                     let mut s = self.shared.status.lock().unwrap();
                     s.active_run = Some(run.id);
@@ -487,18 +568,24 @@ impl Worker {
 
     fn zone(&mut self) {
         let Some(id) = self.active.clone() else { return };
-        let (map_id, explorable) = {
+        let (map_id, explorable, bounds) = {
             let l = self.shared.latest.lock().unwrap();
             match l.map_id {
-                Some(m) => (m, l.explorable),
+                Some(m) => (m, l.explorable, l.bounds),
                 None => return,
             }
         };
-        let body = self.with_position(json!({ "client_session": self.session, "map_id": map_id, "is_explorable": explorable }));
+        let mut body = self.with_position(json!({ "client_session": self.session, "map_id": map_id, "is_explorable": explorable }));
+        // The bounds ride with the position, and only while sharing: the site needs them to place it on the map.
+        let with_bounds = self.sharing() && bounds.is_some();
+        if let (true, Some(b)) = (with_bounds, bounds) {
+            body["bounds"] = json!(b);
+        }
         let path = format!("/api/tracker/runs/{id}/zone");
         match self.call(4, |api, t| api.post(&path, t, &body)) {
             Ok(v) => {
                 self.last_beat = Instant::now();
+                self.bounds_sent = with_bounds;
                 if v.get("ignored").and_then(Value::as_bool) == Some(true) {
                     self.say("Another game client took over this run.");
                     self.stop_run();
@@ -527,7 +614,18 @@ impl Worker {
             return;
         }
         self.last_beat = Instant::now();
-        let body = self.with_position(json!({ "client_session": self.session }));
+        // Sharing was switched on after this zone was reported, so the server has no bounds for it: report the zone
+        // again (with position and bounds) instead of a plain heartbeat.
+        let need_bounds = !self.bounds_sent && self.position_to_send().is_some() && self.shared.latest.lock().unwrap().bounds.is_some();
+        if need_bounds {
+            self.zone();
+            return;
+        }
+        let mut body = self.with_position(json!({ "client_session": self.session }));
+        let samples = self.take_samples();
+        if !samples.is_empty() {
+            body["points"] = json!(samples.iter().map(|(x, y)| json!([x, y])).collect::<Vec<_>>());
+        }
         let path = format!("/api/tracker/runs/{id}/heartbeat");
         match self.call(1, |api, t| api.post(&path, t, &body)) {
             Ok(v) if v.get("ignored").and_then(Value::as_bool) == Some(true) => {
@@ -535,7 +633,10 @@ impl Worker {
                 self.stop_run();
             }
             Ok(_) => {}
-            Err(e) => self.failed(&e),
+            Err(e) => {
+                self.shared.latest.lock().unwrap().restore_samples(samples); // they were not delivered
+                self.failed(&e);
+            }
         }
     }
 }
@@ -617,7 +718,7 @@ mod tests {
     }
 
     fn fast() -> Timing {
-        Timing { heartbeat: Duration::from_millis(300), position_beat: Duration::from_millis(100), retry_base: Duration::from_millis(5) }
+        Timing { heartbeat: Duration::from_millis(300), position_beat: Duration::from_millis(100), retry_base: Duration::from_millis(5), sample: Duration::from_millis(20) }
     }
 
     fn wait(what: &str, mut ok: impl FnMut() -> bool) {
@@ -677,7 +778,7 @@ mod tests {
     #[test]
     fn nothing_is_sent_before_start_run() {
         let (up, log) = start_uplink(None);
-        up.push_zone(55, false);
+        up.push_zone(55, false, None);
         up.set_position(Some(Pos { x: 1.0, y: 2.0, z: 3.0 }));
         thread::sleep(Duration::from_millis(700));
         assert!(log.lock().unwrap().is_empty(), "sent {:?}", log.lock().unwrap());
@@ -686,7 +787,7 @@ mod tests {
     #[test]
     fn tracks_a_run_with_map_only_by_default() {
         let (up, log) = start_uplink(None);
-        up.push_zone(55, false); // standing in Lion's Arch before pressing Start
+        up.push_zone(55, false, None); // standing in Lion's Arch before pressing Start
         track(&up);
         wait("first zone", || !requests(&log, "/zone").is_empty());
         let z = &requests(&log, "/zone")[0];
@@ -698,7 +799,7 @@ mod tests {
         wait("progress", || up.status().progress == Some(40));
 
         up.set_position(Some(Pos { x: 10.0, y: 20.0, z: 0.0 })); // available, but sharing is off
-        up.push_zone(90, true);
+        up.push_zone(90, true, None);
         wait("second zone", || requests(&log, "/zone").len() >= 2);
         wait("a heartbeat", || !requests(&log, "/heartbeat").is_empty());
 
@@ -719,7 +820,7 @@ mod tests {
     fn sends_position_only_when_sharing_is_on() {
         let (up, log) = start_uplink(None);
         up.update_config(|c| c.share_position = true);
-        up.push_zone(55, false);
+        up.push_zone(55, false, None);
         track(&up);
         up.set_position(Some(Pos { x: 123.5, y: -456.25, z: 7.0 }));
         wait("a heartbeat with a position", || requests(&log, "/heartbeat").iter().any(|r| r.body["x"] == 123.5 && r.body["y"] == -456.25));
@@ -738,21 +839,159 @@ mod tests {
     fn a_zone_change_does_not_resend_the_old_maps_position() {
         let (up, log) = start_uplink(None);
         up.update_config(|c| c.share_position = true);
-        up.push_zone(55, false);
+        up.push_zone(55, false, None);
         track(&up);
         up.set_position(Some(Pos { x: 5.0, y: 6.0, z: 0.0 }));
-        up.push_zone(90, true);
+        up.push_zone(90, true, None);
         wait("zone 90", || requests(&log, "/zone").iter().any(|r| r.body["map_id"] == 90));
         let z = requests(&log, "/zone").into_iter().find(|r| r.body["map_id"] == 90).unwrap();
         assert!(z.body.get("x").is_none(), "old position sent with the new map: {z:?}");
     }
 
+    /// Starts an uplink whose heartbeats are slow enough that a test can queue several samples before one goes out.
+    fn start_slow_beat() -> (Uplink, Arc<Mutex<Vec<Req>>>) {
+        let (base, log) = mock_server(None);
+        let timing = Timing { heartbeat: Duration::from_millis(600), position_beat: Duration::from_millis(600), retry_base: Duration::from_millis(5), sample: Duration::from_millis(20) };
+        let up = Uplink::with_base(&base, true, None, timing);
+        up.update_config(|c| c.token = "tips_trk_test".into());
+        (up, log)
+    }
+
+    fn points_of(r: &Req) -> Vec<(f64, f64)> {
+        r.body["points"].as_array().map(|a| a.iter().map(|p| (p[0].as_f64().unwrap(), p[1].as_f64().unwrap())).collect()).unwrap_or_default()
+    }
+
+    fn sample(up: &Uplink, x: f32, y: f32) {
+        up.set_position(Some(Pos { x, y, z: 0.0 }));
+        thread::sleep(Duration::from_millis(40)); // past the sample interval
+    }
+
+    #[test]
+    fn the_sample_buffer_keeps_one_per_interval_and_the_newest_twenty() {
+        let mut l = Latest::default();
+        let (t0, every) = (Instant::now(), Duration::from_secs(1));
+        l.add_sample(1.0, 1.0, t0, every);
+        l.add_sample(2.0, 2.0, t0 + Duration::from_millis(400), every); // inside the interval: skipped
+        assert_eq!(l.samples.iter().copied().collect::<Vec<_>>(), vec![(1.0, 1.0)]);
+        for i in 1..=30u32 {
+            l.add_sample(100.0 + i as f32, 0.0, t0 + Duration::from_secs(i as u64), every);
+        }
+        assert_eq!(l.samples.len(), MAX_POINTS);
+        assert_eq!(l.samples.back(), Some(&(130.0, 0.0)), "the newest is kept");
+        assert_eq!(l.samples.front(), Some(&(111.0, 0.0)), "the oldest were dropped");
+    }
+
+    #[test]
+    fn samples_that_could_not_be_sent_go_back_in_front_of_newer_ones() {
+        let mut l = Latest::default();
+        l.samples.extend([(3.0, 3.0), (4.0, 4.0)]);
+        l.restore_samples(vec![(1.0, 1.0), (2.0, 2.0)]);
+        assert_eq!(l.samples.iter().copied().collect::<Vec<_>>(), vec![(1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0)]);
+        l.restore_samples((0..30).map(|i| (i as f32, 0.0)).collect());
+        assert_eq!(l.samples.len(), MAX_POINTS);
+        assert_eq!(l.samples.back(), Some(&(4.0, 4.0)), "the newest survive");
+    }
+
+    #[test]
+    fn a_heartbeat_carries_the_samples_in_order_and_the_latest_position() {
+        let (up, log) = start_slow_beat();
+        up.update_config(|c| c.share_position = true);
+        up.push_zone(90, true, None);
+        track(&up);
+        for i in 1..=3 {
+            sample(&up, i as f32, -(i as f32));
+        }
+        wait("a heartbeat with points", || requests(&log, "/heartbeat").iter().any(|r| !points_of(r).is_empty()));
+        let beat = requests(&log, "/heartbeat").into_iter().find(|r| !points_of(r).is_empty()).unwrap();
+        assert_eq!(points_of(&beat), vec![(1.0, -1.0), (2.0, -2.0), (3.0, -3.0)]);
+        assert_eq!((beat.body["x"].as_f64(), beat.body["y"].as_f64()), (Some(3.0), Some(-3.0)));
+    }
+
+    #[test]
+    fn samples_are_sent_once() {
+        let (up, log) = start_slow_beat();
+        up.update_config(|c| c.share_position = true);
+        up.push_zone(90, true, None);
+        track(&up);
+        sample(&up, 1.0, 1.0);
+        wait("the heartbeat with the sample", || requests(&log, "/heartbeat").iter().any(|r| !points_of(r).is_empty()));
+        let seen = requests(&log, "/heartbeat").len();
+        wait("the next heartbeat", || requests(&log, "/heartbeat").len() > seen);
+        assert!(points_of(&requests(&log, "/heartbeat")[seen]).is_empty(), "the old sample was sent again");
+    }
+
+    #[test]
+    fn nothing_extra_is_sent_with_sharing_off() {
+        let (up, log) = start_slow_beat();
+        up.push_zone(90, true, Some([-1.0, -2.0, 3.0, 4.0]));
+        track(&up);
+        sample(&up, 1.0, 1.0);
+        sample(&up, 2.0, 2.0);
+        wait("a heartbeat", || !requests(&log, "/heartbeat").is_empty());
+        for r in requests(&log, "/heartbeat") {
+            assert!(r.body.get("x").is_none() && r.body.get("y").is_none() && r.body.get("points").is_none(), "{r:?}");
+        }
+        for r in requests(&log, "/zone") {
+            assert!(r.body.get("bounds").is_none() && r.body.get("points").is_none(), "{r:?}");
+        }
+    }
+
+    #[test]
+    fn a_zone_carries_the_bounds_when_known_and_never_points() {
+        let (up, log) = start_slow_beat();
+        up.update_config(|c| c.share_position = true);
+        up.push_zone(90, true, Some([-1.0, -2.0, 3.0, 4.0]));
+        track(&up);
+        wait("a zone with bounds", || requests(&log, "/zone").iter().any(|r| r.body.get("bounds").is_some()));
+        let z = requests(&log, "/zone").into_iter().find(|r| r.body.get("bounds").is_some()).unwrap();
+        assert_eq!(z.body["bounds"], json!([-1.0, -2.0, 3.0, 4.0]));
+        assert!(z.body.get("points").is_none());
+        up.push_zone(91, true, None);
+        wait("a zone without bounds", || requests(&log, "/zone").iter().any(|r| r.body["map_id"] == 91));
+        let z = requests(&log, "/zone").into_iter().find(|r| r.body["map_id"] == 91).unwrap();
+        assert!(z.body.get("bounds").is_none(), "{z:?}");
+    }
+
+    #[test]
+    fn a_zone_change_drops_the_old_zones_samples() {
+        let (up, log) = start_slow_beat();
+        up.update_config(|c| c.share_position = true);
+        up.push_zone(90, true, None);
+        track(&up);
+        sample(&up, 1.0, 1.0);
+        sample(&up, 2.0, 2.0);
+        up.push_zone(91, true, None);
+        wait("zone 91", || requests(&log, "/zone").iter().any(|r| r.body["map_id"] == 91));
+        sample(&up, 50.0, 50.0);
+        wait("a heartbeat with points", || requests(&log, "/heartbeat").iter().any(|r| !points_of(r).is_empty()));
+        let beat = requests(&log, "/heartbeat").into_iter().find(|r| !points_of(r).is_empty()).unwrap();
+        assert_eq!(points_of(&beat), vec![(50.0, 50.0)]);
+    }
+
+    #[test]
+    fn switching_sharing_on_mid_zone_sends_the_bounds_and_position_once() {
+        let (up, log) = start_slow_beat();
+        up.push_zone(90, true, None); // sharing is off: nothing about position or bounds is read or sent
+        track(&up);
+        wait("the first zone", || !requests(&log, "/zone").is_empty());
+        up.update_config(|c| c.share_position = true);
+        up.set_bounds(Some([-1.0, -2.0, 3.0, 4.0]));
+        sample(&up, 7.0, 8.0);
+        wait("a zone with the bounds", || requests(&log, "/zone").iter().any(|r| r.body.get("bounds").is_some()));
+        let z = requests(&log, "/zone").into_iter().find(|r| r.body.get("bounds").is_some()).unwrap();
+        assert_eq!(z.body["map_id"], 90);
+        assert_eq!(z.body["x"], 7.0);
+        let count = requests(&log, "/zone").iter().filter(|r| r.body.get("bounds").is_some()).count();
+        thread::sleep(Duration::from_millis(1500));
+        assert_eq!(requests(&log, "/zone").iter().filter(|r| r.body.get("bounds").is_some()).count(), count, "the bounds were sent again and again");
+    }
+
     #[test]
     fn stops_when_the_route_finishes() {
         let (up, _log) = start_uplink(Some(20));
-        up.push_zone(55, false);
+        up.push_zone(55, false, None);
         track(&up);
-        up.push_zone(20, false);
+        up.push_zone(20, false, None);
         wait("run to stop", || up.status().active_run.is_none());
         assert!(up.status().message.contains("finished"), "{}", up.status().message);
     }
@@ -784,7 +1023,7 @@ mod tests {
     fn e2e_against_the_local_server() {
         let base = std::env::var("TIPS_E2E_BASE").expect("TIPS_E2E_BASE");
         let token = std::env::var("TIPS_E2E_TOKEN").expect("TIPS_E2E_TOKEN");
-        let up = Uplink::with_base(&base, true, None, Timing { heartbeat: Duration::from_secs(1), position_beat: Duration::from_millis(500), retry_base: Duration::from_millis(50) });
+        let up = Uplink::with_base(&base, true, None, Timing { heartbeat: Duration::from_secs(1), position_beat: Duration::from_millis(500), retry_base: Duration::from_millis(50), sample: Duration::from_millis(100) });
         up.update_config(|c| {
             c.token = token;
             c.share_position = true;
@@ -792,14 +1031,30 @@ mod tests {
         up.refresh();
         wait("next run", || up.status().next_run.is_some());
         println!("next run: {:?}", up.status().next_run);
-        up.push_zone(133, false);
+        up.push_zone(133, false, None);
         up.start_run();
         wait("active run", || up.status().active_run.is_some());
-        up.push_zone(90, true);
+        up.push_zone(90, true, Some([-24576.0, -24576.0, 24576.0, 24576.0]));
         up.set_position(Some(Pos { x: 1000.0, y: -2000.0, z: 0.0 })); // after the zone change, as the game loop does
         wait("progress", || up.status().progress.is_some());
         println!("progress {:?}, message {:?}", up.status().progress, up.status().message);
-        thread::sleep(Duration::from_millis(1500));
+        // Walk east, a sample every interval, and check the public trail endpoint gets the points in order.
+        for i in 1..=4 {
+            thread::sleep(Duration::from_millis(150));
+            up.set_position(Some(Pos { x: 1000.0 + 100.0 * i as f32, y: -2000.0, z: 0.0 }));
+        }
+        let run_id = up.status().active_run.expect("active run");
+        let api = Api::new(&base, true).unwrap();
+        let mut xs: Vec<i64> = Vec::new();
+        wait("the trail to reach the server", || {
+            let v = api.get("/api/live-trails", &up.config().token).unwrap();
+            let mine = v["trails"].as_array().unwrap().iter().find(|t| t["run_id"] == run_id.as_str());
+            xs = mine.map(|t| t["points"].as_array().unwrap().iter().step_by(2).filter_map(Value::as_i64).collect()).unwrap_or_default();
+            xs.last() == Some(&1400)
+        });
+        println!("trail x values on the server: {xs:?}");
+        assert!(xs.windows(2).all(|w| w[0] <= w[1]), "points out of order: {xs:?}");
+        assert_eq!(xs.first(), Some(&1000));
         up.end_run();
         wait("end", || up.status().active_run.is_none());
     }

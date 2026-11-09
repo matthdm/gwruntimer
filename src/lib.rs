@@ -251,6 +251,9 @@ impl ZoneTimer {
         let reading = self.probe.read(agent_id, gw::agent_context_addr());
         let source = position::Source::from_index(up.config().position_source);
         up.set_position(reading.pick(source));
+        if up.wants_bounds() {
+            up.set_bounds(position::read_bounds()); // sharing was switched on after this map loaded
+        }
         if self.recorder.recording {
             let map_id = gw::MissionMapData::current().map_or(0, |m| m.map_id);
             self.recorder.push(map_id, &reading, position::read_bounds_raw());
@@ -764,7 +767,9 @@ impl ImguiRenderLoop for ZoneTimer {
                     self.state.mapid_during_run = self.state.mapid_now;
                     self.state.mapid_now = cur_map_id;
                     if let Some(up) = &self.uplink {
-                        up.push_zone(cur_map_id, map_data.is_explorable != 0);
+                        // The map's bounds are only read while the runner is sharing their position.
+                        let bounds = if up.sharing() { position::read_bounds() } else { None };
+                        up.push_zone(cur_map_id, map_data.is_explorable != 0, bounds);
                     }
                     if !self.elapsed().is_zero() {
                         self.record_run(
