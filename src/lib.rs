@@ -5,6 +5,7 @@ mod map_names;
 mod categories;
 mod mapdump;
 mod position;
+mod clipboard;
 mod uplink;
 
 pub mod version {
@@ -726,6 +727,7 @@ fn format_system_date(t: SystemTime) -> String {
 
 impl ImguiRenderLoop for ZoneTimer {
     fn initialize<'a>(&'a mut self, ctx: &mut imgui::Context, _rc: &'a mut dyn RenderContext) {
+        ctx.set_clipboard_backend(clipboard::WindowsClipboard); // so Ctrl+V works in the TIPS token box
         let fonts = ctx.fonts();
         fonts.add_font(&[FontSource::DefaultFontData { config: None }]);
         let id = fonts.add_font(&[FontSource::TtfData {
