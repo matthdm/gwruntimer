@@ -170,7 +170,7 @@ fn find_agent_array() -> Option<usize> {
 
 /// Base address and size of the running executable's image.
 #[cfg(all(windows, target_arch = "x86"))]
-fn main_module() -> Option<(usize, usize)> {
+pub(crate) fn main_module() -> Option<(usize, usize)> {
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     let base = unsafe { GetModuleHandleW(None).ok()? }.0 as usize;
     let pe = base + gw::read_u32(base + 0x3C)? as usize; // IMAGE_DOS_HEADER.e_lfanew
@@ -182,13 +182,13 @@ fn main_module() -> Option<(usize, usize)> {
 }
 
 #[cfg(not(all(windows, target_arch = "x86")))]
-fn main_module() -> Option<(usize, usize)> {
+pub(crate) fn main_module() -> Option<(usize, usize)> {
     None
 }
 
 /// Finds `pattern` (with `mask`: 'x' = must match, anything else = wildcard) in `size` bytes at `base`,
 /// reading in chunks and skipping anything unreadable. Returns the address of the match.
-fn scan(base: usize, size: usize, pattern: &[u8], mask: &str) -> Option<usize> {
+pub(crate) fn scan(base: usize, size: usize, pattern: &[u8], mask: &str) -> Option<usize> {
     const CHUNK: usize = 64 * 1024;
     let mut buf = vec![0u8; CHUNK + pattern.len()];
     let mut offset = 0usize;

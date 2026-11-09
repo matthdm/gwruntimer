@@ -3,6 +3,7 @@ mod gw;
 mod run_log;
 mod map_names;
 mod categories;
+mod mapdump;
 mod position;
 mod uplink;
 
@@ -112,6 +113,7 @@ struct ZoneTimer {
     /// Text box contents for the tracker token.
     tips_token_input: String,
     probe: position::Probe,
+    recorder: mapdump::Recorder,
     last_pos_read: Option<Instant>,
     last_reading: Option<position::Reading>,
 }
@@ -145,6 +147,7 @@ impl Default for ZoneTimer {
             was_tips_edit: false,
             tips_token_input: String::new(),
             probe: position::Probe::default(),
+            recorder: mapdump::Recorder::default(),
             last_pos_read: None,
             last_reading: None,
             state: ZoneTimerState {
@@ -248,6 +251,10 @@ impl ZoneTimer {
         let reading = self.probe.read(agent_id, gw::agent_context_addr());
         let source = position::Source::from_index(up.config().position_source);
         up.set_position(reading.pick(source));
+        if self.recorder.recording {
+            let map_id = gw::MissionMapData::current().map_or(0, |m| m.map_id);
+            self.recorder.push(map_id, &reading, mapdump::read_bounds());
+        }
         self.last_reading = Some(reading);
     }
 
@@ -352,6 +359,27 @@ impl ZoneTimer {
                     show(ui, "Movement A (+0x64)", &r.movement_a);
                     show(ui, "Movement B (+0x74)", &r.movement_b);
                 }
+            }
+        }
+
+        if ui.collapsing_header("Map data spike (throwaway experiment)", TreeNodeFlags::empty()) {
+            ui.text_wrapped("Saves the game's own map rectangles, this map's bounds and a recording of your walk to tips_mapdump.json next to the DLL. Nothing is sent anywhere.");
+            if self.recorder.recording {
+                if ui.button("Stop recording") {
+                    self.recorder.recording = false;
+                }
+                ui.same_line();
+                ui.text(format!("recording, {} samples", self.recorder.len()));
+            } else if ui.button("Record my walk") {
+                self.recorder.start();
+            }
+            if ui.button("Save map data file") {
+                let path = hudhook::util::get_dll_path().map(|p| p.parent().unwrap().join("tips_mapdump.json"));
+                let current = gw::MissionMapData::current().map(|m| (m.map_id, m.is_explorable != 0));
+                self.recorder.save(path, current);
+            }
+            if !self.recorder.message.is_empty() {
+                ui.text_wrapped(&self.recorder.message);
             }
         }
 

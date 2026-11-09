@@ -152,6 +152,15 @@ pub fn agent_context_addr() -> Option<usize> {
     }
 }
 
+/// Address of the game's map context (starts with `map_boundaries`), if there is one.
+pub fn map_context_addr() -> Option<usize> {
+    unsafe {
+        let pctx = get_context_tls().as_ref()?;
+        let p = pctx.map as usize;
+        (p != 0).then_some(p)
+    }
+}
+
 pub fn get_instance_uptime() -> Option<& 'static u32> {
     unsafe {
         let pctx = get_context_tls().as_ref()?;
