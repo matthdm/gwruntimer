@@ -60,16 +60,6 @@ pub fn area_json(id: u32, raw: &[u8]) -> Option<Value> {
     }))
 }
 
-/// The current map's `map_boundaries`: five floats at the start of the map context.
-pub fn read_bounds() -> Option<[f32; 5]> {
-    let ctx = gw::map_context_addr()?;
-    let mut b = [0u8; 20];
-    if !gw::read_into(ctx, &mut b) {
-        return None;
-    }
-    Some(std::array::from_fn(|i| f32::from_le_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]])))
-}
-
 /// The first `CONTEXT_RAW_BYTES` of the map context, each word as hex and as a float.
 fn context_raw() -> Option<Value> {
     let ctx = gw::map_context_addr()?;
@@ -185,7 +175,7 @@ impl Recorder {
             "current_is_explorable": current.map(|c| c.1),
             "map_table_found": table.is_some(),
             "map_table_addr": table.map(|a| format!("{a:#x}")),
-            "map_context_bounds": read_bounds().map(|b| b.map(|v| v as f64)),
+            "map_context_bounds": position::read_bounds_raw().map(|b| b.map(|v| v as f64)),
             "map_context_raw": context_raw(),
             "area_count": areas.len(),
             "areas": areas,

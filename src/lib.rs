@@ -253,7 +253,7 @@ impl ZoneTimer {
         up.set_position(reading.pick(source));
         if self.recorder.recording {
             let map_id = gw::MissionMapData::current().map_or(0, |m| m.map_id);
-            self.recorder.push(map_id, &reading, mapdump::read_bounds());
+            self.recorder.push(map_id, &reading, position::read_bounds_raw());
         }
         self.last_reading = Some(reading);
     }
@@ -356,8 +356,9 @@ impl ZoneTimer {
                     if let Some(plane) = r.plane {
                         ui.text(format!("Plane: {plane}"));
                     }
-                    show(ui, "Movement A (+0x64)", &r.movement_a);
-                    show(ui, "Movement B (+0x74)", &r.movement_b);
+                    // The first float of a movement vector is unused (always 0); x and y are the next two. z shows that first float.
+                    show(ui, "Movement A (+0x64, z = unused first float)", &r.movement_a);
+                    show(ui, "Movement B (+0x74, z = unused first float)", &r.movement_b);
                 }
             }
         }

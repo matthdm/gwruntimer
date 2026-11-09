@@ -1,7 +1,8 @@
 //! Reads the controlled character's position (x, y inside the current map) for the TIPS tracker.
 //!
-//! This is an experiment: the offsets come from GWCA's headers and its agent-array byte pattern, and
-//! haven't been confirmed against a running client yet. So every read goes through `gw::read_into`
+//! The position that works on this client is the `AgentMovement` vector at +0x64 (`Source::MovementA`): its
+//! first float is always 0 and the next two are x and y (see `movement_pos`). GWCA's agent-array pattern does
+//! not match this client, so the agent source finds nothing. Every read goes through `gw::read_into`
 //! (ReadProcessMemory on our own process), which fails safely instead of faulting, and the panel shows
 //! each candidate value so you can see which one follows your character.
 //!
@@ -47,13 +48,42 @@ impl Pos {
     }
 }
 
+/// The position in an `AgentMovement` vector: the first float is unused (always 0), then x, then y.
+/// Recorded in Plains of Jarin and Churrhir Fields. `z` carries the unused first float, for the debug panel.
+pub fn movement_pos(v: [f32; 3]) -> Pos {
+    Pos { x: v[1], y: v[2], z: v[0] }
+}
+
+/// The map's coordinate bounds `[min_x, min_y, max_x, max_y]` from the five floats at the start of the map
+/// context (`[unknown, min_x, min_y, max_x, max_y]`). None if any is not finite or a min is not below its max.
+pub fn bounds_from(raw: [f32; 5]) -> Option<[f32; 4]> {
+    let [_, min_x, min_y, max_x, max_y] = raw;
+    let ok = [min_x, min_y, max_x, max_y].iter().all(|v| v.is_finite()) && min_x < max_x && min_y < max_y;
+    ok.then_some([min_x, min_y, max_x, max_y])
+}
+
+/// The five floats at the start of the current map's context, as the game keeps them. None if unreadable.
+pub fn read_bounds_raw() -> Option<[f32; 5]> {
+    let ctx = gw::map_context_addr()?;
+    let mut b = [0u8; 20];
+    if !gw::read_into(ctx, &mut b) {
+        return None;
+    }
+    Some(std::array::from_fn(|i| f32::from_le_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]])))
+}
+
+/// The current map's bounds `[min_x, min_y, max_x, max_y]`, or None if they can't be read or don't make sense.
+pub fn read_bounds() -> Option<[f32; 4]> {
+    read_bounds_raw().and_then(bounds_from)
+}
+
 /// Which memory location the tracker trusts for the position it sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Source {
-    /// `Agent.pos` found through GWCA's agent array (the primary candidate).
-    #[default]
+    /// `Agent.pos` found through GWCA's agent array. Not found on this client.
     Agent,
-    /// `AgentMovement` Vec3f at +0x64.
+    /// `AgentMovement` Vec3f at +0x64: unused, x, y. The one that works.
+    #[default]
     MovementA,
     /// `AgentMovement` Vec3f at +0x74.
     MovementB,
@@ -70,7 +100,6 @@ impl Source {
         }
     }
 
-    #[cfg(test)]
     pub fn to_index(self) -> usize {
         Self::ALL.iter().position(|s| *s == self).unwrap_or(0)
     }
@@ -127,8 +156,8 @@ impl Probe {
         }
         if let Some(ctx) = agent_ctx {
             if let Some(mv) = array_entry(ctx + AGENT_CTX_MOVEMENT, agent_id) {
-                r.movement_a = read_vec3(mv + MOVEMENT_VEC_A);
-                r.movement_b = read_vec3(mv + MOVEMENT_VEC_B);
+                r.movement_a = read_movement(mv + MOVEMENT_VEC_A);
+                r.movement_b = read_movement(mv + MOVEMENT_VEC_B);
             }
         }
         r
@@ -151,8 +180,8 @@ fn read_vec(xy_addr: usize, z_addr: usize) -> Option<Pos> {
     Some(Pos { x: gw::read_f32(xy_addr)?, y: gw::read_f32(xy_addr + 4)?, z: gw::read_f32(z_addr)? })
 }
 
-fn read_vec3(addr: usize) -> Option<Pos> {
-    Some(Pos { x: gw::read_f32(addr)?, y: gw::read_f32(addr + 4)?, z: gw::read_f32(addr + 8)? })
+fn read_movement(addr: usize) -> Option<Pos> {
+    Some(movement_pos([gw::read_f32(addr)?, gw::read_f32(addr + 4)?, gw::read_f32(addr + 8)?]))
 }
 
 // ---- finding the agent array ----
@@ -267,6 +296,31 @@ mod tests {
         for s in Source::ALL {
             assert_eq!(Source::from_index(s.to_index()), s);
         }
-        assert_eq!(Source::from_index(99), Source::Agent);
+        assert_eq!(Source::from_index(99), Source::MovementA);
+    }
+
+    #[test]
+    fn movement_vector_is_unused_then_x_then_y() {
+        // Recorded in Plains of Jarin: the first float is always 0, then x, then y.
+        assert_eq!(movement_pos([0.0, 18353.0, 81.0]), Pos { x: 18353.0, y: 81.0, z: 0.0 });
+    }
+
+    #[test]
+    fn the_movement_vector_is_the_default_source() {
+        assert_eq!(Source::default(), Source::MovementA);
+    }
+
+    #[test]
+    fn bounds_come_from_the_four_floats_after_the_unused_one() {
+        assert_eq!(bounds_from([0.0, -18432.0, -21504.0, 21504.0, 21504.0]), Some([-18432.0, -21504.0, 21504.0, 21504.0]));
+    }
+
+    #[test]
+    fn bounds_must_be_finite_with_min_below_max() {
+        assert_eq!(bounds_from([0.0, 5.0, 0.0, 5.0, 10.0]), None); // minX == maxX
+        assert_eq!(bounds_from([0.0, 0.0, 9.0, 10.0, 5.0]), None); // minY > maxY
+        assert_eq!(bounds_from([0.0, f32::NAN, 0.0, 10.0, 10.0]), None);
+        assert_eq!(bounds_from([0.0, 0.0, 0.0, f32::INFINITY, 10.0]), None);
+        assert_eq!(bounds_from([0.0; 5]), None); // an unset context
     }
 }

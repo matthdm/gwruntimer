@@ -34,13 +34,19 @@ const POSITION_FRESH: Duration = Duration::from_secs(15);
 // ---------- settings ----------
 
 /// Saved next to the DLL as `tips_tracker.cfg`. The token is like a password: it can post as this runner.
-#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub token: String,
     /// Off unless the runner turns it on. Sends x/y inside the map.
     pub share_position: bool,
     /// Index into `position::Source::ALL`.
     pub position_source: usize,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config { token: String::new(), share_position: false, position_source: crate::position::Source::MovementA.to_index() }
+    }
 }
 
 impl Config {
@@ -52,7 +58,11 @@ impl Config {
             match k.trim() {
                 "token" if v.len() <= MAX_TOKEN => c.token = v.to_string(),
                 "share_position" => c.share_position = v == "1",
-                "position_source" => c.position_source = v.parse().unwrap_or(0),
+                "position_source" => {
+                    if let Ok(i) = v.parse() {
+                        c.position_source = i;
+                    }
+                }
                 _ => {}
             }
         }
@@ -644,9 +654,10 @@ mod tests {
         let c = Config { token: "tips_trk_abc".into(), share_position: true, position_source: 2 };
         assert_eq!(Config::parse(&c.serialize()), c);
         let junk = Config::parse("nonsense\ntoken=short\n=\nshare_position=maybe\nposition_source=x\nunknown=1\n");
-        assert_eq!(junk, Config { token: "short".into(), share_position: false, position_source: 0 });
+        assert_eq!(junk, Config { token: "short".into(), share_position: false, position_source: crate::position::Source::MovementA.to_index() });
         assert_eq!(Config::parse(&format!("token={}\n", "a".repeat(500))).token, "");
         assert!(!Config::default().share_position, "position sharing must be off by default");
+        assert_eq!(Config::default().position_source, crate::position::Source::MovementA.to_index(), "the movement vector is the default source");
     }
 
     #[test]
