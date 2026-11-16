@@ -90,7 +90,7 @@ Engine::CallResult Engine::call(const int attempts, const std::function<Response
         else {
             e = {r.status, error_text(r.body), false};
         }
-        if (e.retryable() && n + 1 < attempts) {
+        if (e.retryable() && n + 1 < attempts && !(cancelled_ && cancelled_())) {
             sleep_(timing_.retry_base * (1 << n));
             last = e;
             continue;

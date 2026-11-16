@@ -37,6 +37,8 @@ public:
     bool tracking() const { return active_.has_value() || general_; }
     /// Best-effort tidy end of whatever is on. Safe to call more than once.
     void shutdown();
+    /// While this returns true a failed request is not retried (the Uplink is shutting down).
+    void set_cancel(std::function<bool()> cancelled) { cancelled_ = std::move(cancelled); }
 
 private:
     struct ApiError {
@@ -76,6 +78,7 @@ private:
     Timing timing_;
     std::function<Tp()> now_;
     std::function<void(Ms)> sleep_;
+    std::function<bool()> cancelled_;
     std::string session_;
 
     std::optional<std::string> active_; // the run being reported on
