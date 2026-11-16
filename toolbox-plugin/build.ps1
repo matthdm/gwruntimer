@@ -11,7 +11,7 @@ param(
     [switch]$Run,
     [switch]$Dist,
     [string]$Config = 'RelWithDebInfo',
-    [string]$ApiBase = 'https://tips-runs.invalid',
+    [string]$ApiBase = 'https://tips-run.com',
     [string]$ToolboxDir = '',
     [switch]$Reconfigure
 )

@@ -1,5 +1,8 @@
 # TIPS live tracking (this fork's addition)
 
+> **Also available as a GWToolbox++ plugin** (no launcher, nothing injected): see [`toolbox-plugin/README.md`](toolbox-plugin/README.md).
+> The text below describes the tracker module inside this timer.
+
 Tells the [TIPS run board](https://github.com/matthdm/tips-run) which map the runner is in, and optionally where inside
 it, so customers can follow a run. The existing timer is unchanged: the tracker does nothing until a token is entered and
 **Start run** is pressed.

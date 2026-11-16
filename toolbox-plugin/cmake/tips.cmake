@@ -5,7 +5,7 @@ if(NOT TIPS_ROOT)
     message(FATAL_ERROR "TIPS_ROOT is not set (use toolbox-plugin/build.ps1)")
 endif()
 if(NOT TIPS_API_BASE)
-    set(TIPS_API_BASE "https://tips-runs.invalid")
+    set(TIPS_API_BASE "https://tips-run.com")
 endif()
 
 function(tips_setup)
