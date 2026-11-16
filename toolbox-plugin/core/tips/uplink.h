@@ -51,14 +51,20 @@ public:
     void start_general();
     void end_general();
 
-    /// Asks the worker to stop: aborts a request in flight, sends one best-effort end, exits.
+    /// Asks the worker to stop: aborts a request in flight, sends one best-effort end, exits. Returns at once.
     void signal_stop();
+    /// signal_stop(), then waits until the worker has finished: up to `polite` for the final end request to go
+    /// out, then aborts it and waits up to `hard` more. Returns stopped(). Toolbox's close-game path
+    /// (ForceTerminate) asks CanTerminate() once, right after SignalTerminate(), and terminates the plugin module
+    /// whatever the answer, so a plugin that is still running then makes Toolbox crash.
+    bool stop_and_wait(Ms polite, Ms hard);
     /// The worker thread has finished (safe to unload the DLL).
     bool stopped() const { return stopped_; }
 
 private:
     void send(Cmd cmd);
     void run();
+    bool wait_stopped(Ms limit) const;
     bool sharing_locked() const;
 
     mutable Shared shared_;
@@ -70,6 +76,11 @@ private:
     std::deque<Cmd> queue_;
     bool stop_ = false;
     std::atomic<bool> stopped_{false};
+    // While stopping, retries are cancelled and backoff sleeps cut short, except during the final end request
+    // (`final_phase_`), which is retried briefly so a runner does not stay on the map; `giveup_` ends even that.
+    std::atomic<bool> final_phase_{false};
+    std::atomic<bool> giveup_{false};
+    bool stop_cancels_retries() const; // call with queue_m_ held or not: only reads atomics
     std::thread worker_;
 };
 

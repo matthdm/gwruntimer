@@ -25,7 +25,11 @@ struct State {
     std::vector<std::thread::id> threads;
     bool gate_open = true;      // closed: every request waits
     bool block_zone = false;    // a zone request waits until abort()
+    bool block_end = false;     // an end request waits until abort() has been called twice
+    std::chrono::milliseconds end_delay{0}; // an end request takes this long to answer
+    int end_failures = 0;       // the first N end requests fail with a network error
     bool aborted = false;
+    int aborts = 0;
 
     int count(const std::string& suffix)
     {
@@ -52,6 +56,7 @@ public:
     {
         std::lock_guard g(st->m);
         st->aborted = true;
+        ++st->aborts;
         st->cv.notify_all();
     }
 
@@ -65,6 +70,21 @@ private:
         if (st->block_zone && path.size() >= 5 && path.substr(path.size() - 5) == "/zone") {
             st->cv.wait(l, [&] { return st->aborted; });
             return {0, {}, "aborted"};
+        }
+        const bool is_end = path.size() >= 4 && path.substr(path.size() - 4) == "/end";
+        if (is_end && st->block_end) {
+            st->cv.wait(l, [&] { return st->aborts >= 2; }); // the first abort is the stop itself, the second cuts this
+            return {0, {}, "aborted"};
+        }
+        if (is_end && st->end_failures > 0) {
+            --st->end_failures;
+            return {0, {}, "network down"};
+        }
+        if (is_end && st->end_delay.count() > 0) {
+            const auto delay = st->end_delay;
+            l.unlock();
+            std::this_thread::sleep_for(delay);
+            l.lock();
         }
         if (path == "/api/tracker/next-run") return {200, kRunJson, {}};
         return {200, "{\"ok\":true}", {}};
@@ -252,4 +272,98 @@ TEST(an_idle_uplink_sends_nothing_when_destroyed)
         std::this_thread::sleep_for(300ms);
     }
     CHECK(st->total() == 0);
+}
+
+// Toolbox closes the game with ForceTerminate: it calls the plugin's SignalTerminate() and asks CanTerminate() once,
+// at once, then terminates the plugin module regardless (PluginModule::Terminate asserts no plugin is still loaded).
+// So the plugin must be finished when SignalTerminate() returns, not some frames later.
+
+TEST(stop_and_wait_returns_only_after_the_worker_finished_a_slow_end_request)
+{
+    auto st = std::make_shared<State>();
+    st->end_delay = 300ms;
+    Config c = with_token();
+    c.tracking_mode = TrackingMode::General;
+    Uplink up(std::make_unique<Fake>(st), c);
+    up.start_general();
+    CHECK(wait_for([&] { return up.status().active_general; }));
+    const bool stopped = up.stop_and_wait(1500ms, 2000ms);
+    CHECK(stopped);
+    CHECK(up.stopped()); // what Toolbox's CanTerminate() sees, immediately
+    CHECK(st->count("/presence/end") == 1);
+}
+
+TEST(stop_and_wait_cuts_a_hanging_end_request_and_still_finishes_in_bounded_time)
+{
+    auto st = std::make_shared<State>();
+    st->block_end = true;
+    Config c = with_token();
+    c.tracking_mode = TrackingMode::General;
+    Uplink up(std::make_unique<Fake>(st), c);
+    up.start_general();
+    CHECK(wait_for([&] { return up.status().active_general; }));
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool stopped = up.stop_and_wait(300ms, 2000ms);
+    const auto took = std::chrono::steady_clock::now() - t0;
+    CHECK(stopped);
+    CHECK(up.stopped());
+    CHECK(took < 1500ms);
+}
+
+TEST(stop_and_wait_on_an_idle_uplink_is_immediate_and_sends_nothing)
+{
+    auto st = std::make_shared<State>();
+    Uplink up(std::make_unique<Fake>(st), with_token());
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK(up.stop_and_wait(1500ms, 2000ms));
+    CHECK(std::chrono::steady_clock::now() - t0 < 1000ms);
+    CHECK(up.stopped());
+    CHECK(st->total() == 0);
+}
+
+TEST(signal_stop_alone_returns_before_the_worker_has_finished_which_is_why_close_game_crashed_toolbox)
+{
+    auto st = std::make_shared<State>();
+    st->end_delay = 300ms;
+    Config c = with_token();
+    c.tracking_mode = TrackingMode::General;
+    Uplink up(std::make_unique<Fake>(st), c);
+    up.start_general();
+    CHECK(wait_for([&] { return up.status().active_general; }));
+    up.signal_stop();
+    CHECK(!up.stopped()); // Toolbox's one CanTerminate() check, right after SignalTerminate(), would say "not yet"
+    CHECK(wait_for([&] { return up.stopped(); }, 3000ms)); // it does finish, just not synchronously
+}
+
+// The runner must not stay on the TIPS map after the game closes: the final end request is retried (briefly) if the
+// first attempt fails, but never past the bounded wait that keeps Toolbox from crashing.
+
+TEST(the_final_end_request_is_retried_once_if_the_first_attempt_fails)
+{
+    auto st = std::make_shared<State>();
+    st->end_failures = 1;
+    Config c = with_token();
+    c.tracking_mode = TrackingMode::General;
+    Timing t;
+    t.retry_base = 20ms;
+    Uplink up(std::make_unique<Fake>(st), c, t);
+    up.start_general();
+    CHECK(wait_for([&] { return up.status().active_general; }));
+    CHECK(up.stop_and_wait(1500ms, 2000ms));
+    CHECK(st->count("/presence/end") == 2); // the first failed, the retry went through
+}
+
+TEST(the_final_end_request_is_not_retried_once_the_wait_has_given_up)
+{
+    auto st = std::make_shared<State>();
+    st->block_end = true;
+    Config c = with_token();
+    c.tracking_mode = TrackingMode::General;
+    Uplink up(std::make_unique<Fake>(st), c);
+    up.start_general();
+    CHECK(wait_for([&] { return up.status().active_general; }));
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK(up.stop_and_wait(300ms, 2000ms));
+    CHECK(std::chrono::steady_clock::now() - t0 < 1500ms);
+    CHECK(st->count("/presence/end") == 1); // cut at 300 ms and not tried again
 }
