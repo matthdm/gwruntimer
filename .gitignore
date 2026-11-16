@@ -4,3 +4,4 @@ reference_material/**
 /.superpowers
 /toolbox-plugin/build
 /toolbox-plugin/dist
+/toolbox-plugin/.tools
