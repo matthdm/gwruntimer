@@ -14,8 +14,6 @@
 
 namespace {
 
-constexpr float kSampleEveryMs = 250.f; // how often the character's position is read
-
 #if defined(_DEBUG) || defined(TIPS_ALLOW_LOCALHOST)
 constexpr bool kDebugBuild = true; // may talk to http://localhost
 #else
@@ -116,7 +114,7 @@ void TipsTrackerPlugin::sample_position()
     if (uplink_->wants_bounds()) uplink_->set_bounds(read_bounds()); // sharing was switched on after this map loaded
 }
 
-void TipsTrackerPlugin::Update(const float delta_ms)
+void TipsTrackerPlugin::Update(const float delta_seconds)
 {
     if (!uplink_) return;
     const bool loaded = GW::Map::GetIsMapLoaded();
@@ -128,9 +126,7 @@ void TipsTrackerPlugin::Update(const float delta_ms)
         uplink_->push_zone(zone->map_id, zone->explorable, uplink_->sharing() ? read_bounds() : std::nullopt);
     }
 
-    since_sample_ms_ += delta_ms;
-    if (since_sample_ms_ < kSampleEveryMs) return;
-    since_sample_ms_ = 0.f;
+    if (!sample_clock_.tick(delta_seconds)) return;
     if (!(loaded && instance != tips::Instance::Loading)) {
         uplink_->set_position(std::nullopt);
         return;

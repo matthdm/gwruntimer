@@ -6,6 +6,7 @@
 
 #include <ToolboxUIPlugin.h>
 
+#include "tips/sample_clock.h"
 #include "tips/types.h"
 #include "tips/uplink.h"
 #include "tips/zone_watcher.h"
@@ -22,7 +23,8 @@ public:
     bool CanTerminate() override;
     void Terminate() override;
 
-    void Update(float delta_ms) override;
+    /// Toolbox calls this every frame with the frame time in seconds (not milliseconds).
+    void Update(float delta_seconds) override;
     void Draw(IDirect3DDevice9*) override;
 
     void LoadSettings(const wchar_t* folder) override;
@@ -35,7 +37,7 @@ private:
 
     std::unique_ptr<tips::Uplink> uplink_;
     tips::ZoneWatcher zone_;
-    float since_sample_ms_ = 0.f;
+    tips::SampleClock sample_clock_{0.25f}; // the position is read about four times a second
     std::wstring settings_folder_; // remembered so the panel's Save button can write the settings at once
     char token_buf_[160] = {};
 };
