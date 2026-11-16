@@ -17,7 +17,8 @@ namespace tips {
 /// {"client_session": ...}
 std::string body_session(std::string_view session);
 
-/// {"client_session","map_id","is_explorable"} plus x/y when `pos` is given, plus bounds only when both are given.
+/// {"client_session","map_id","is_explorable"} plus x/y when `pos` is given, plus bounds when given (the server stores
+/// them independently of the position; the caller passes them only while sharing).
 std::string body_zone(std::string_view session, uint32_t map_id, bool explorable, std::optional<Pos> pos, std::optional<Bounds> bounds);
 
 /// {"client_session"} plus x/y when `pos` is given, plus "points": [[x,y],...] (oldest first) when there are any.

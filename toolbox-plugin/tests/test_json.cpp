@@ -48,11 +48,15 @@ TEST(body_zone_with_position_and_bounds_adds_x_y_bounds)
     CHECK(v["bounds"][3].get_number() == 21504.0);
 }
 
-TEST(body_zone_never_sends_bounds_without_a_position)
+TEST(body_zone_sends_bounds_even_without_a_position)
 {
+    // The server stores a zone's bounds independently of the position (api/src/handlers/tracker.ts, zone), and
+    // the Rust tracker sends them whenever sharing is on, so a zone reported before the first position still has them.
     auto v = parse(body_zone("s", 20, true, std::nullopt, Bounds{0.f, 0.f, 1.f, 1.f}));
-    CHECK(!v.contains("bounds"));
+    CHECK(v.contains("bounds"));
+    if (v.contains("bounds")) CHECK(v["bounds"].get_array().size() == 4);
     CHECK(!v.contains("x"));
+    CHECK(!v.contains("y"));
 }
 
 TEST(body_heartbeat_carries_points_oldest_first_only_when_present)

@@ -108,16 +108,14 @@ std::string body_zone(const std::string_view session, const uint32_t map_id, con
     append_uint(out, map_id);
     out += ",\"is_explorable\":";
     out += explorable ? "true" : "false";
-    if (pos) {
-        append_pos(out, *pos);
-        if (bounds) {
-            out += ",\"bounds\":[";
-            for (std::size_t i = 0; i < bounds->size(); ++i) {
-                if (i) out += ',';
-                append_float(out, (*bounds)[i]);
-            }
-            out += ']';
+    if (pos) append_pos(out, *pos);
+    if (bounds) {
+        out += ",\"bounds\":[";
+        for (std::size_t i = 0; i < bounds->size(); ++i) {
+            if (i) out += ',';
+            append_float(out, (*bounds)[i]);
         }
+        out += ']';
     }
     out += '}';
     return out;
