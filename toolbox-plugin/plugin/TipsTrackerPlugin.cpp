@@ -53,7 +53,10 @@ void TipsTrackerPlugin::Initialize(ImGuiContext* ctx, const ImGuiAllocFns alloca
 void TipsTrackerPlugin::SignalTerminate()
 {
     ToolboxUIPlugin::SignalTerminate();
-    if (uplink_) uplink_->signal_stop(); // aborts a request in flight and sends one tidy end if a run is on
+    // Must be finished when this returns: when the game closes, Toolbox asks CanTerminate() once, straight after
+    // this, and then terminates its plugin module whatever we answer (it asserts that no plugin is still loaded,
+    // which crashed Toolbox with "YOU ARE USING PLUGINS"). Sends one tidy end if tracking; bounded to ~3.5 s.
+    if (uplink_) uplink_->stop_and_wait(std::chrono::milliseconds(1500), std::chrono::milliseconds(2000));
 }
 
 bool TipsTrackerPlugin::CanTerminate()

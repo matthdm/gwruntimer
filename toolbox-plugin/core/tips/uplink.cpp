@@ -30,7 +30,7 @@ Uplink::Uplink(std::unique_ptr<Transport> transport, Config initial, const Timin
           [this](const Ms d) {
               // A backoff sleep that a shutdown cuts short.
               std::unique_lock l(queue_m_);
-              queue_cv_.wait_for(l, d, [this] { return stop_; });
+              queue_cv_.wait_for(l, d, [this] { return stop_ && stop_cancels_retries(); });
           },
           session.empty() ? new_session_id() : std::move(session))
 {
@@ -39,7 +39,7 @@ Uplink::Uplink(std::unique_ptr<Transport> transport, Config initial, const Timin
     shared_.sample_every = timing.sample;
     engine_.set_cancel([this] {
         std::lock_guard l(queue_m_);
-        return stop_;
+        return stop_ && stop_cancels_retries();
     });
     worker_ = std::thread([this] { run(); });
 }
@@ -58,6 +58,27 @@ void Uplink::signal_stop()
     }
     queue_cv_.notify_all();
     transport_->abort(); // after stop_ is set, so the request that fails is not retried
+}
+
+bool Uplink::wait_stopped(const Ms limit) const
+{
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (!stopped_ && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    return stopped_;
+}
+
+bool Uplink::stop_cancels_retries() const
+{
+    return !final_phase_ || giveup_;
+}
+
+bool Uplink::stop_and_wait(const Ms polite, const Ms hard)
+{
+    signal_stop();
+    if (wait_stopped(polite)) return true;
+    giveup_ = true;      // no more attempts, however the final request ends
+    transport_->abort(); // the final end request is taking too long: cut it so the worker can finish
+    return wait_stopped(hard);
 }
 
 void Uplink::send(const Cmd cmd)
@@ -96,7 +117,8 @@ void Uplink::run()
         }
         engine_.tick();
     }
-    engine_.shutdown(); // the game or the tracker is closing: best-effort tidy end of whatever is on
+    final_phase_ = true;
+    engine_.shutdown(); // the game or the tracker is closing: tidy end of whatever is on, retried briefly
     {
         std::lock_guard g(shared_.m);
         shared_.status.busy = false;
