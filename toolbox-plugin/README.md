@@ -7,16 +7,33 @@ injected. The timer is not part of it.
 
 ## Install
 
-1. Close Guild Wars (or leave it open and use Refresh in step 4).
-2. Copy `TipsTracker.dll` to the plugins folder of your Toolbox data folder. For a default install that is
-   `%USERPROFILE%\Documents\GWToolboxpp\<your computer name>\plugins\` (the folder that also holds `GWToolbox.ini`;
-   create `plugins` if it is missing).
-3. Start Guild Wars and Toolbox.
-4. In Toolbox open **Settings > Plugins**, press **Refresh** if the plugin is not listed, and tick **TIPS Tracker**.
-   The *TIPS Tracker* window opens.
+Requires **GWToolbox++ 8.34** (see "Build and test" below for why the version matters).
 
-Toolbox shows its own warning about third-party plugins: ArenaNet does not permit plugins and they run with the
+1. Download `TipsTracker.dll`.
+2. Copy it into the `plugins` folder inside your Toolbox data folder. By default that is
+   `%USERPROFILE%\Documents\GWToolboxpp\<a folder named after your computer>\plugins\`: open
+   `Documents\GWToolboxpp`, go into the folder that contains `GWToolbox.ini`, and use (or create) `plugins` there.
+3. Start Guild Wars and Toolbox. If the game is already running, that is fine: use **Refresh** in step 4.
+4. In Toolbox open **Settings > Plugins**. Press **Refresh** if `TipsTracker.dll` is not listed, then press
+   **Load** next to it. The *TIPS Tracker* window opens; the small checkbox on the same row shows or hides it.
+   Toolbox remembers that the plugin is loaded and loads it again next time.
+
+To remove it: press **Unload** in the same place, then delete `TipsTracker.dll` (and `TIPS Tracker.json`, which holds
+your saved token, from the same folder).
+
+Toolbox shows its own warning about third-party plugins: ArenaNet does not permit plugins, and they run with the
 game's permissions. This DLL is not code-signed.
+
+## If something goes wrong
+
+- **Not listed under Plugins:** the DLL is in the wrong folder (it must be next to your `GWToolbox.ini`'s `plugins`
+  folder, not the Toolbox program folder). Press **Refresh**.
+- **"Failed to load plugin" in Toolbox's log:** Windows Defender or another antivirus may have blocked the DLL (Toolbox
+  says so when it can tell), or your Toolbox is not 8.34. Allow the file, or update/downgrade Toolbox.
+- **"TIPS rejected the token":** make a new token on the site and Save it again; a new token replaces the old one.
+- **Nothing on the TIPS map:** check the status line in the window. General tracking needs **Start tracking**; a run
+  needs **Start run**. Your position only shows while sharing is on (always on in General tracking).
+- **Position check shows no x/y:** you are on a loading screen or have not entered a map yet.
 
 ## First use
 
